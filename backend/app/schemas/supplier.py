@@ -1,5 +1,6 @@
 from __future__ import annotations
 from datetime import datetime
+from decimal import Decimal
 from typing import Optional
 from uuid import UUID
 from pydantic import BaseModel
@@ -19,6 +20,23 @@ class SupplierBase(BaseModel):
     google_listings_approved: bool = False
     contacts: Optional[list] = None
     crm_notes: Optional[list] = None
+    # SRM fields
+    status: Optional[str] = "LEAD"
+    company_email: Optional[str] = None
+    contact_name: Optional[str] = None
+    phone: Optional[str] = None
+    product_categories: Optional[list] = None
+    follow_up_date: Optional[datetime] = None
+    approved_at: Optional[datetime] = None
+    # Commercial terms
+    payment_terms: Optional[str] = None
+    min_order_qty: Optional[int] = None
+    lead_time_days: Optional[int] = None
+    return_policy: Optional[str] = None
+    map_enforced: Optional[bool] = False
+    warranty_info: Optional[str] = None
+    # MAP & pricing
+    map_price: Optional[Decimal] = None
 
 
 class SupplierCreate(SupplierBase):
@@ -39,6 +57,23 @@ class SupplierUpdate(BaseModel):
     google_listings_approved: Optional[bool] = None
     contacts: Optional[list] = None
     crm_notes: Optional[list] = None
+    # SRM fields
+    status: Optional[str] = None
+    company_email: Optional[str] = None
+    contact_name: Optional[str] = None
+    phone: Optional[str] = None
+    product_categories: Optional[list] = None
+    follow_up_date: Optional[datetime] = None
+    approved_at: Optional[datetime] = None
+    # Commercial terms
+    payment_terms: Optional[str] = None
+    min_order_qty: Optional[int] = None
+    lead_time_days: Optional[int] = None
+    return_policy: Optional[str] = None
+    map_enforced: Optional[bool] = None
+    warranty_info: Optional[str] = None
+    # MAP & pricing
+    map_price: Optional[Decimal] = None
 
 
 class SupplierOut(SupplierBase):
@@ -48,6 +83,7 @@ class SupplierOut(SupplierBase):
     created_at: datetime
     updated_at: Optional[datetime] = None
     product_count: int = 0
+    email_count: int = 0
 
     model_config = {"from_attributes": True}
 

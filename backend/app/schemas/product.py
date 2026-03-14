@@ -87,6 +87,7 @@ class ProductBase(BaseModel):
     # e.g. [{"name": "Color", "position": 1}, {"name": "Size", "position": 2}]
     options: Optional[list[dict]] = None
     cost_price: Optional[Decimal] = None
+    map_price: Optional[Decimal] = None
     base_price: Optional[Decimal] = None
     compare_at_price: Optional[Decimal] = None
     metafields: Optional[dict] = None
@@ -109,6 +110,7 @@ class ProductUpdate(BaseModel):
     status: Optional[str] = None
     supplier_id: Optional[UUID] = None
     cost_price: Optional[Decimal] = None
+    map_price: Optional[Decimal] = None
     base_price: Optional[Decimal] = None
     compare_at_price: Optional[Decimal] = None
     seo_title: Optional[str] = None

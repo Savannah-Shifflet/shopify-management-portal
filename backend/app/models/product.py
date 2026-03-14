@@ -45,6 +45,7 @@ class Product(Base):
 
     # Pricing
     cost_price = Column(Numeric(10, 2))
+    map_price = Column(Numeric(10, 2))   # Minimum Advertised Price
     base_price = Column(Numeric(10, 2))
     compare_at_price = Column(Numeric(10, 2))
     supplier_price = Column(Numeric(10, 2))

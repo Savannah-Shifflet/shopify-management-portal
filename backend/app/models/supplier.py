@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 from sqlalchemy import Column, String, Boolean, Integer, DateTime, ForeignKey, Text, Numeric
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy.dialects.postgresql import UUID, JSONB, ARRAY
 from sqlalchemy.orm import relationship
 from app.database import Base
 
@@ -34,6 +34,26 @@ class Supplier(Base):
     # CRM — notes log: [{text, created_at}]
     crm_notes = Column(JSONB, default=list)
 
+    # SRM fields
+    status = Column(String(50), default="LEAD", index=True)  # LEAD|CONTACTED|NEGOTIATING|APPROVED|REJECTED|INACTIVE
+    company_email = Column(String(255))           # primary contact email (unique within user)
+    contact_name = Column(String(255))
+    phone = Column(String(100))
+    product_categories = Column(ARRAY(String), default=list)
+    follow_up_date = Column(DateTime, nullable=True)
+    approved_at = Column(DateTime, nullable=True)
+
+    # Commercial terms
+    payment_terms = Column(String(100))            # e.g. "Net 30"
+    min_order_qty = Column(Integer)
+    lead_time_days = Column(Integer)
+    return_policy = Column(Text)
+    map_enforced = Column(Boolean, default=False)
+    warranty_info = Column(Text)
+
+    # MAP & pricing
+    map_price = Column(Numeric(10, 2))            # global supplier MAP (can be overridden per product)
+
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -42,3 +62,7 @@ class Supplier(Base):
     pricing_rules = relationship("PricingRule", back_populates="supplier", lazy="dynamic")
     scrape_sessions = relationship("ScrapeSession", back_populates="supplier", lazy="dynamic")
     detail_scrape_logs = relationship("DetailScrapeLog", back_populates="supplier", lazy="dynamic")
+    emails = relationship("SupplierEmail", back_populates="supplier", lazy="dynamic", cascade="all, delete-orphan")
+    documents = relationship("SupplierDocument", back_populates="supplier", lazy="dynamic", cascade="all, delete-orphan")
+    checklist_items = relationship("SupplierChecklistItem", back_populates="supplier", lazy="dynamic", cascade="all, delete-orphan")
+    reorders = relationship("ReorderLog", back_populates="supplier", lazy="dynamic", cascade="all, delete-orphan")

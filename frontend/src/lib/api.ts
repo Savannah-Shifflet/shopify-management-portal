@@ -174,3 +174,51 @@ export const syncApi = {
   testConnection: () => api.get("/sync/shopify/connection"),
   pullFromShopify: () => api.post("/sync/shopify/pull"),
 };
+
+// Supplier SRM extensions
+export const supplierSrmApi = {
+  // Status
+  updateStatus: (id: string, status: string) =>
+    api.patch(`/suppliers/${id}/status`, { status }),
+  // Emails
+  listEmails: (id: string) => api.get(`/suppliers/${id}/emails`),
+  logEmail: (id: string, data: unknown) => api.post(`/suppliers/${id}/emails`, data),
+  sendEmail: (id: string, data: unknown) => api.post(`/suppliers/${id}/emails/send`, data),
+  // Documents
+  listDocuments: (id: string) => api.get(`/suppliers/${id}/documents`),
+  uploadDocument: (id: string, formData: FormData) =>
+    api.post(`/suppliers/${id}/documents`, formData, { headers: { "Content-Type": "multipart/form-data" } }),
+  deleteDocument: (id: string, docId: string) => api.delete(`/suppliers/${id}/documents/${docId}`),
+  // Checklist
+  getChecklist: (id: string) => api.get(`/suppliers/${id}/checklist`),
+  addChecklistItem: (id: string, label: string) => api.post(`/suppliers/${id}/checklist`, { label }),
+  updateChecklistItem: (id: string, itemId: string, data: unknown) =>
+    api.patch(`/suppliers/${id}/checklist/${itemId}`, data),
+  deleteChecklistItem: (id: string, itemId: string) => api.delete(`/suppliers/${id}/checklist/${itemId}`),
+  // Reorders
+  listReorders: (id: string) => api.get(`/suppliers/${id}/reorders`),
+  createReorder: (id: string, data: unknown) => api.post(`/suppliers/${id}/reorders`, data),
+  updateReorder: (id: string, reorderId: string, data: unknown) =>
+    api.patch(`/suppliers/${id}/reorders/${reorderId}`, data),
+};
+
+export const emailTemplatesApi = {
+  list: () => api.get("/email-templates/"),
+  create: (data: unknown) => api.post("/email-templates/", data),
+  update: (id: string, data: unknown) => api.patch(`/email-templates/${id}`, data),
+  delete: (id: string) => api.delete(`/email-templates/${id}`),
+};
+
+export const reordersApi = {
+  list: () => api.get("/reorders/"),
+};
+
+export const auditApi = {
+  list: (params?: Record<string, unknown>) => api.get("/audit/", { params }),
+};
+
+export const storeSettingsApi = {
+  get: () => api.get("/store-settings/"),
+  update: (data: unknown) => api.patch("/store-settings/", data),
+  testEmail: () => api.post("/store-settings/test-email"),
+};

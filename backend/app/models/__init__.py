@@ -9,6 +9,13 @@ from app.models.sync_log import ShopifySyncLog
 from app.models.scrape_session import ScrapeSession
 from app.models.detail_scrape_log import DetailScrapeLog
 from app.models.description_template import DescriptionTemplate
+from app.models.supplier_email import SupplierEmail
+from app.models.supplier_document import SupplierDocument
+from app.models.checklist import ChecklistTemplate, SupplierChecklistItem
+from app.models.reorder import ReorderLog
+from app.models.email_template import EmailTemplate
+from app.models.audit_log import AuditLog
+from app.models.store_settings import StoreSettings
 
 __all__ = [
     "User",
@@ -25,4 +32,12 @@ __all__ = [
     "ScrapeSession",
     "DetailScrapeLog",
     "DescriptionTemplate",
+    "SupplierEmail",
+    "SupplierDocument",
+    "ChecklistTemplate",
+    "SupplierChecklistItem",
+    "ReorderLog",
+    "EmailTemplate",
+    "AuditLog",
+    "StoreSettings",
 ]

@@ -1,19 +1,24 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { settingsApi } from "@/lib/api";
+import { settingsApi, storeSettingsApi } from "@/lib/api";
 import { PageShell } from "@/components/layout/PageShell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Wifi, WifiOff, Loader2, Unplug } from "lucide-react";
+import { Wifi, WifiOff, Loader2, Unplug, CheckCircle } from "lucide-react";
 
 export default function SettingsPage() {
   const qc = useQueryClient();
   const [storeDomain, setStoreDomain] = useState("");
   const [connectError, setConnectError] = useState<string | null>(null);
+
+  // Store settings state
+  const [storeForm, setStoreForm] = useState<any>(null);
+  const [storeSaved, setStoreSaved] = useState(false);
+  const [testEmailResult, setTestEmailResult] = useState<string | null>(null);
 
   const { data: shopify, isLoading } = useQuery({
     queryKey: ["shopify-settings"],
@@ -43,6 +48,33 @@ export default function SettingsPage() {
       qc.invalidateQueries({ queryKey: ["shopify-settings"] });
       qc.invalidateQueries({ queryKey: ["sync-status"] });
     },
+  });
+
+  // Store settings queries
+  const { data: storeData } = useQuery({
+    queryKey: ["store-settings"],
+    queryFn: () => storeSettingsApi.get().then((r) => r.data),
+  });
+
+  useEffect(() => {
+    if (storeData && !storeForm) {
+      setStoreForm(storeData);
+    }
+  }, [storeData]);
+
+  const storeUpdateMutation = useMutation({
+    mutationFn: () => storeSettingsApi.update(storeForm),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["store-settings"] });
+      setStoreSaved(true);
+      setTimeout(() => setStoreSaved(false), 3000);
+    },
+  });
+
+  const testEmailMutation = useMutation({
+    mutationFn: () => storeSettingsApi.testEmail(),
+    onSuccess: () => setTestEmailResult("Test email sent successfully!"),
+    onError: () => setTestEmailResult("Failed to send test email. Check your SMTP settings."),
   });
 
   return (
@@ -149,6 +181,156 @@ export default function SettingsPage() {
             <p className="text-sm text-gray-500">
               Backend API: <code className="bg-gray-100 px-1 rounded text-xs">{process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}</code>
             </p>
+          </CardContent>
+        </Card>
+
+        {/* Store Settings */}
+        <Card>
+          <CardHeader className="pb-4">
+            <CardTitle className="text-base">Store Settings</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <Label>Store Name</Label>
+                <Input
+                  className="mt-1"
+                  value={storeForm?.store_name || ""}
+                  onChange={(e) => setStoreForm((prev: any) => ({ ...prev, store_name: e.target.value }))}
+                  placeholder="My Store"
+                />
+              </div>
+              <div>
+                <Label>Owner Name</Label>
+                <Input
+                  className="mt-1"
+                  value={storeForm?.owner_name || ""}
+                  onChange={(e) => setStoreForm((prev: any) => ({ ...prev, owner_name: e.target.value }))}
+                  placeholder="Jane Smith"
+                />
+              </div>
+              <div>
+                <Label>Currency</Label>
+                <Input
+                  className="mt-1"
+                  value={storeForm?.currency || ""}
+                  onChange={(e) => setStoreForm((prev: any) => ({ ...prev, currency: e.target.value }))}
+                  placeholder="USD"
+                />
+              </div>
+              <div>
+                <Label>Timezone</Label>
+                <Input
+                  className="mt-1"
+                  value={storeForm?.timezone || ""}
+                  onChange={(e) => setStoreForm((prev: any) => ({ ...prev, timezone: e.target.value }))}
+                  placeholder="America/New_York"
+                />
+              </div>
+            </div>
+            <Button
+              size="sm"
+              onClick={() => storeUpdateMutation.mutate()}
+              disabled={storeUpdateMutation.isPending || !storeForm}
+            >
+              {storeUpdateMutation.isPending
+                ? <><Loader2 className="h-4 w-4 mr-1 animate-spin" />Saving...</>
+                : storeSaved
+                ? <><CheckCircle className="h-4 w-4 mr-1 text-green-500" />Saved</>
+                : "Save Store Settings"}
+            </Button>
+          </CardContent>
+        </Card>
+
+        {/* Email (SMTP) */}
+        <Card>
+          <CardHeader className="pb-4">
+            <CardTitle className="text-base">Email (SMTP)</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <Label>SMTP Host</Label>
+                <Input
+                  className="mt-1"
+                  value={storeForm?.smtp_host || ""}
+                  onChange={(e) => setStoreForm((prev: any) => ({ ...prev, smtp_host: e.target.value }))}
+                  placeholder="smtp.gmail.com"
+                />
+              </div>
+              <div>
+                <Label>SMTP Port</Label>
+                <Input
+                  className="mt-1"
+                  type="number"
+                  value={storeForm?.smtp_port || ""}
+                  onChange={(e) => setStoreForm((prev: any) => ({ ...prev, smtp_port: e.target.value ? Number(e.target.value) : null }))}
+                  placeholder="587"
+                />
+              </div>
+              <div>
+                <Label>SMTP Username</Label>
+                <Input
+                  className="mt-1"
+                  value={storeForm?.smtp_user || ""}
+                  onChange={(e) => setStoreForm((prev: any) => ({ ...prev, smtp_user: e.target.value }))}
+                  placeholder="you@gmail.com"
+                />
+              </div>
+              <div>
+                <Label>SMTP Password</Label>
+                <Input
+                  className="mt-1"
+                  type="password"
+                  value={storeForm?.smtp_password || ""}
+                  onChange={(e) => setStoreForm((prev: any) => ({ ...prev, smtp_password: e.target.value }))}
+                  placeholder="••••••••"
+                />
+              </div>
+              <div>
+                <Label>From Name</Label>
+                <Input
+                  className="mt-1"
+                  value={storeForm?.smtp_from_name || ""}
+                  onChange={(e) => setStoreForm((prev: any) => ({ ...prev, smtp_from_name: e.target.value }))}
+                  placeholder="My Store"
+                />
+              </div>
+              <div>
+                <Label>From Email</Label>
+                <Input
+                  className="mt-1"
+                  type="email"
+                  value={storeForm?.smtp_from_email || ""}
+                  onChange={(e) => setStoreForm((prev: any) => ({ ...prev, smtp_from_email: e.target.value }))}
+                  placeholder="noreply@mystore.com"
+                />
+              </div>
+            </div>
+            <div className="flex gap-2 items-center">
+              <Button
+                size="sm"
+                onClick={() => storeUpdateMutation.mutate()}
+                disabled={storeUpdateMutation.isPending || !storeForm}
+              >
+                {storeUpdateMutation.isPending ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : null}
+                Save Email Settings
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => { setTestEmailResult(null); testEmailMutation.mutate(); }}
+                disabled={testEmailMutation.isPending}
+              >
+                {testEmailMutation.isPending ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : null}
+                Test Email
+              </Button>
+            </div>
+            {testEmailResult && (
+              <p className={`text-sm ${testEmailResult.startsWith("Test email sent") ? "text-green-600" : "text-red-600"}`}>
+                {testEmailResult}
+              </p>
+            )}
           </CardContent>
         </Card>
       </div>

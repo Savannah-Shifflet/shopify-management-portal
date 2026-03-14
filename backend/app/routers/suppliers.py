@@ -1,6 +1,8 @@
+import uuid as uuid_module
+from datetime import datetime
 from typing import Optional
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -13,6 +15,47 @@ from app.models.user import User
 from app.schemas.supplier import SupplierCreate, SupplierUpdate, SupplierOut, SupplierStats
 
 router = APIRouter(prefix="/api/v1/suppliers", tags=["suppliers"])
+
+
+# ── SRM inline schemas ────────────────────────────────────────────────────────
+
+from datetime import datetime as dt_type
+
+class StatusUpdate(BaseModel):
+    status: str
+
+class EmailIn(BaseModel):
+    direction: str  # INBOUND | OUTBOUND
+    subject: Optional[str] = None
+    body: Optional[str] = None
+    sent_at: Optional[dt_type] = None
+    attachments: Optional[list] = None
+
+class SendEmailIn(BaseModel):
+    to_email: str
+    subject: str
+    body: str
+
+class ChecklistItemIn(BaseModel):
+    label: str
+
+class ChecklistItemUpdate(BaseModel):
+    completed: Optional[bool] = None
+    notes: Optional[str] = None
+
+class ReorderIn(BaseModel):
+    po_number: Optional[str] = None
+    order_date: Optional[str] = None
+    expected_delivery: Optional[str] = None
+    status: str = "Pending"
+    line_items: Optional[list] = None
+    notes: Optional[str] = None
+
+class ReorderUpdate(BaseModel):
+    po_number: Optional[str] = None
+    status: Optional[str] = None
+    expected_delivery: Optional[str] = None
+    notes: Optional[str] = None
 
 
 @router.get("/", response_model=list[SupplierOut])
@@ -428,6 +471,215 @@ def suggest_selectors(
     return result
 
 
+# ── Pipeline / status ─────────────────────────────────────────────────────────
+
+@router.patch("/{supplier_id}/status")
+def update_status(
+    supplier_id: UUID,
+    payload: StatusUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    supplier = _get_or_404(supplier_id, current_user.id, db)
+    old_status = supplier.status
+    supplier.status = payload.status
+    if payload.status == "APPROVED" and not supplier.approved_at:
+        supplier.approved_at = datetime.utcnow()
+    db.commit()
+    _audit(db, current_user.id, "SUPPLIER_STATUS_CHANGE", "Supplier", str(supplier_id),
+           f"{supplier.name}: {old_status} → {payload.status}")
+    return {"status": supplier.status}
+
+# ── Emails ────────────────────────────────────────────────────────────────────
+
+@router.get("/{supplier_id}/emails")
+def list_emails(supplier_id: UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    _get_or_404(supplier_id, current_user.id, db)
+    from app.models.supplier_email import SupplierEmail
+    emails = db.query(SupplierEmail).filter(SupplierEmail.supplier_id == supplier_id).order_by(SupplierEmail.sent_at).all()
+    return [{"id": str(e.id), "direction": e.direction, "subject": e.subject, "body": e.body,
+             "sent_at": e.sent_at.isoformat(), "attachments": e.attachments or []} for e in emails]
+
+@router.post("/{supplier_id}/emails")
+def log_email(supplier_id: UUID, payload: EmailIn, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    supplier = _get_or_404(supplier_id, current_user.id, db)
+    from app.models.supplier_email import SupplierEmail
+    from datetime import datetime as _dt
+    email = SupplierEmail(
+        supplier_id=supplier_id,
+        direction=payload.direction,
+        subject=payload.subject,
+        body=payload.body,
+        sent_at=payload.sent_at or _dt.utcnow(),
+        attachments=payload.attachments or [],
+    )
+    db.add(email)
+    if payload.direction == "OUTBOUND" and supplier.status == "LEAD":
+        supplier.status = "CONTACTED"
+    db.commit()
+    _audit(db, current_user.id, "EMAIL_LOGGED", "Supplier", str(supplier_id),
+           f"{'Sent to' if payload.direction == 'OUTBOUND' else 'Received from'} {supplier.name}: {payload.subject}")
+    return {"id": str(email.id)}
+
+@router.post("/{supplier_id}/emails/send")
+def send_email(supplier_id: UUID, payload: SendEmailIn, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Send an email via SMTP and log it."""
+    supplier = _get_or_404(supplier_id, current_user.id, db)
+    from app.models.store_settings import StoreSettings
+    from app.models.supplier_email import SupplierEmail
+    from datetime import datetime as _dt
+    settings = db.query(StoreSettings).filter(StoreSettings.user_id == current_user.id).first()
+    if not settings or not settings.smtp_host:
+        raise HTTPException(status_code=400, detail="SMTP not configured. Go to Settings to configure email.")
+    try:
+        import smtplib
+        from email.mime.text import MIMEText
+        from email.mime.multipart import MIMEMultipart
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = payload.subject
+        msg["From"] = f"{settings.smtp_from_name} <{settings.smtp_from_email}>"
+        msg["To"] = payload.to_email
+        msg.attach(MIMEText(payload.body, "html"))
+        with smtplib.SMTP(settings.smtp_host, settings.smtp_port or 587) as server:
+            server.starttls()
+            if settings.smtp_user and settings.smtp_password:
+                server.login(settings.smtp_user, settings.smtp_password)
+            server.sendmail(settings.smtp_from_email, payload.to_email, msg.as_string())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to send email: {str(e)}")
+    email = SupplierEmail(supplier_id=supplier_id, direction="OUTBOUND",
+                          subject=payload.subject, body=payload.body, sent_at=_dt.utcnow())
+    db.add(email)
+    if supplier.status == "LEAD":
+        supplier.status = "CONTACTED"
+    db.commit()
+    _audit(db, current_user.id, "EMAIL_SENT", "Supplier", str(supplier_id),
+           f"Email sent to {supplier.name}: {payload.subject}")
+    return {"sent": True}
+
+# ── Documents ─────────────────────────────────────────────────────────────────
+
+@router.get("/{supplier_id}/documents")
+def list_documents(supplier_id: UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    _get_or_404(supplier_id, current_user.id, db)
+    from app.models.supplier_document import SupplierDocument
+    docs = db.query(SupplierDocument).filter(SupplierDocument.supplier_id == supplier_id).order_by(SupplierDocument.uploaded_at.desc()).all()
+    return [{"id": str(d.id), "name": d.name, "category": d.category, "file_name": d.file_name,
+             "mime_type": d.mime_type, "expires_at": d.expires_at.isoformat() if d.expires_at else None,
+             "uploaded_at": d.uploaded_at.isoformat()} for d in docs]
+
+@router.post("/{supplier_id}/documents")
+async def upload_document(
+    supplier_id: UUID,
+    name: str,
+    category: str = "Other",
+    expires_at: Optional[str] = None,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _get_or_404(supplier_id, current_user.id, db)
+    from app.models.supplier_document import SupplierDocument
+    import os, shutil
+    from datetime import datetime as dt
+    upload_dir = f"uploads/supplier_docs/{supplier_id}"
+    os.makedirs(upload_dir, exist_ok=True)
+    safe_name = f"{uuid_module.uuid4()}_{file.filename}"
+    file_path = f"{upload_dir}/{safe_name}"
+    with open(file_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+    exp = dt.fromisoformat(expires_at) if expires_at else None
+    doc = SupplierDocument(supplier_id=supplier_id, name=name, category=category,
+                           file_path=file_path, file_name=file.filename,
+                           mime_type=file.content_type, expires_at=exp,
+                           uploaded_at=dt.utcnow())
+    db.add(doc)
+    db.commit()
+    return {"id": str(doc.id)}
+
+@router.delete("/{supplier_id}/documents/{doc_id}", status_code=204)
+def delete_document(supplier_id: UUID, doc_id: UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    _get_or_404(supplier_id, current_user.id, db)
+    from app.models.supplier_document import SupplierDocument
+    doc = db.query(SupplierDocument).filter(SupplierDocument.id == doc_id, SupplierDocument.supplier_id == supplier_id).first()
+    if doc:
+        db.delete(doc)
+        db.commit()
+
+# ── Checklist ─────────────────────────────────────────────────────────────────
+
+@router.get("/{supplier_id}/checklist")
+def get_checklist(supplier_id: UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    _get_or_404(supplier_id, current_user.id, db)
+    from app.models.checklist import SupplierChecklistItem
+    items = db.query(SupplierChecklistItem).filter(SupplierChecklistItem.supplier_id == supplier_id).all()
+    return [{"id": str(i.id), "label": i.label, "completed": i.completed, "notes": i.notes, "file_name": i.file_name} for i in items]
+
+@router.post("/{supplier_id}/checklist")
+def add_checklist_item(supplier_id: UUID, payload: ChecklistItemIn, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    _get_or_404(supplier_id, current_user.id, db)
+    from app.models.checklist import SupplierChecklistItem
+    item = SupplierChecklistItem(supplier_id=supplier_id, label=payload.label)
+    db.add(item)
+    db.commit()
+    return {"id": str(item.id)}
+
+@router.patch("/{supplier_id}/checklist/{item_id}")
+def update_checklist_item(supplier_id: UUID, item_id: UUID, payload: ChecklistItemUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    _get_or_404(supplier_id, current_user.id, db)
+    from app.models.checklist import SupplierChecklistItem
+    item = db.query(SupplierChecklistItem).filter(SupplierChecklistItem.id == item_id, SupplierChecklistItem.supplier_id == supplier_id).first()
+    if not item:
+        raise HTTPException(404, "Item not found")
+    for k, v in payload.model_dump(exclude_unset=True).items():
+        setattr(item, k, v)
+    db.commit()
+    return {"id": str(item.id), "completed": item.completed}
+
+@router.delete("/{supplier_id}/checklist/{item_id}", status_code=204)
+def delete_checklist_item(supplier_id: UUID, item_id: UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    _get_or_404(supplier_id, current_user.id, db)
+    from app.models.checklist import SupplierChecklistItem
+    item = db.query(SupplierChecklistItem).filter(SupplierChecklistItem.id == item_id, SupplierChecklistItem.supplier_id == supplier_id).first()
+    if item:
+        db.delete(item)
+        db.commit()
+
+# ── Reorders ──────────────────────────────────────────────────────────────────
+
+@router.get("/{supplier_id}/reorders")
+def list_reorders(supplier_id: UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    _get_or_404(supplier_id, current_user.id, db)
+    from app.models.reorder import ReorderLog
+    rows = db.query(ReorderLog).filter(ReorderLog.supplier_id == supplier_id).order_by(ReorderLog.created_at.desc()).all()
+    return [{"id": str(r.id), "po_number": r.po_number, "order_date": r.order_date.isoformat() if r.order_date else None,
+             "expected_delivery": r.expected_delivery.isoformat() if r.expected_delivery else None,
+             "status": r.status, "line_items": r.line_items, "notes": r.notes,
+             "created_at": r.created_at.isoformat()} for r in rows]
+
+@router.post("/{supplier_id}/reorders", status_code=201)
+def create_reorder(supplier_id: UUID, payload: ReorderIn, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    _get_or_404(supplier_id, current_user.id, db)
+    from app.models.reorder import ReorderLog
+    r = ReorderLog(supplier_id=supplier_id, user_id=current_user.id, **payload.model_dump())
+    db.add(r)
+    db.commit()
+    _audit(db, current_user.id, "REORDER_CREATED", "ReorderLog", str(r.id), f"PO {r.po_number}")
+    return {"id": str(r.id)}
+
+@router.patch("/{supplier_id}/reorders/{reorder_id}")
+def update_reorder(supplier_id: UUID, reorder_id: UUID, payload: ReorderUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    _get_or_404(supplier_id, current_user.id, db)
+    from app.models.reorder import ReorderLog
+    r = db.query(ReorderLog).filter(ReorderLog.id == reorder_id, ReorderLog.supplier_id == supplier_id).first()
+    if not r:
+        raise HTTPException(404, "Reorder not found")
+    for k, v in payload.model_dump(exclude_unset=True).items():
+        setattr(r, k, v)
+    db.commit()
+    return {"id": str(r.id), "status": r.status}
+
+
 def _get_or_404(supplier_id: UUID, user_id, db: Session) -> Supplier:
     s = db.query(Supplier).filter(
         Supplier.id == supplier_id, Supplier.user_id == user_id
@@ -435,3 +687,15 @@ def _get_or_404(supplier_id: UUID, user_id, db: Session) -> Supplier:
     if not s:
         raise HTTPException(status_code=404, detail="Supplier not found")
     return s
+
+
+def _audit(db, user_id, action_type: str, entity_type: str, entity_id: str, description: str):
+    try:
+        from app.models.audit_log import AuditLog
+        from datetime import datetime as _dt
+        log = AuditLog(user_id=user_id, action_type=action_type, entity_type=entity_type,
+                       entity_id=entity_id, description=description, timestamp=_dt.utcnow())
+        db.add(log)
+        db.commit()
+    except Exception:
+        pass

@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useParams } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { suppliersApi, productsApi } from "@/lib/api";
+import { suppliersApi, productsApi, supplierSrmApi } from "@/lib/api";
 import { PageShell } from "@/components/layout/PageShell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -39,7 +39,7 @@ const REVIEW_FIELDS: { key: string; label: string; sampleKey?: keyof typeof EMPT
 
 const EMPTY_SAMPLE = { title: null as string | null, price: null as string | null, sku: null as string | null };
 
-type Tab = "overview" | "pricing" | "scraping" | "crm" | "products";
+type Tab = "overview" | "pricing" | "scraping" | "crm" | "products" | "checklist" | "reorders";
 
 type Tone = "neutral" | "green" | "yellow" | "red";
 
@@ -266,17 +266,63 @@ export default function SupplierDetailPage() {
     setForm((prev: any) => ({ ...prev, crm_notes: updated }));
   }
 
+  // Checklist hooks (must be before early return)
+  const [newChecklistLabel, setNewChecklistLabel] = useState("");
+  const { data: checklistItems = [], refetch: refetchChecklist } = useQuery({
+    queryKey: ["supplier-checklist", id],
+    queryFn: () => supplierSrmApi.getChecklist(id).then((r) => r.data),
+    enabled: tab === "checklist",
+  });
+
+  const addChecklistMutation = useMutation({
+    mutationFn: (label: string) => supplierSrmApi.addChecklistItem(id, label),
+    onSuccess: () => { refetchChecklist(); setNewChecklistLabel(""); },
+  });
+
+  const toggleChecklistMutation = useMutation({
+    mutationFn: ({ itemId, completed }: { itemId: string; completed: boolean }) =>
+      supplierSrmApi.updateChecklistItem(id, itemId, { completed }),
+    onSuccess: () => refetchChecklist(),
+  });
+
+  const deleteChecklistMutation = useMutation({
+    mutationFn: (itemId: string) => supplierSrmApi.deleteChecklistItem(id, itemId),
+    onSuccess: () => refetchChecklist(),
+  });
+
+  // Reorders hooks (must be before early return)
+  const [showReorderForm, setShowReorderForm] = useState(false);
+  const [reorderForm, setReorderForm] = useState({ po_number: "", order_date: "", expected_delivery: "", status: "Pending", notes: "" });
+  const { data: reorders = [], refetch: refetchReorders } = useQuery({
+    queryKey: ["supplier-reorders", id],
+    queryFn: () => supplierSrmApi.listReorders(id).then((r) => r.data),
+    enabled: tab === "reorders",
+  });
+
+  const createReorderMutation = useMutation({
+    mutationFn: () => supplierSrmApi.createReorder(id, reorderForm),
+    onSuccess: () => { refetchReorders(); setShowReorderForm(false); setReorderForm({ po_number: "", order_date: "", expected_delivery: "", status: "Pending", notes: "" }); },
+  });
+
+  const updateReorderStatusMutation = useMutation({
+    mutationFn: ({ reorderId, status }: { reorderId: string; status: string }) =>
+      supplierSrmApi.updateReorder(id, reorderId, { status }),
+    onSuccess: () => refetchReorders(),
+  });
+
   if (!form) {
     return <PageShell title="Loading..."><Loader2 className="animate-spin" /></PageShell>;
   }
 
   const productCount = stats?.product_count ?? supplier?.product_count ?? 0;
   const TABS: { key: Tab; label: string }[] = [
-    { key: "overview", label: "Overview" },
-    { key: "products", label: `Products${productCount > 0 ? ` (${productCount})` : ""}` },
-    { key: "pricing",  label: "Pricing" },
-    { key: "scraping", label: "Scraping" },
-    { key: "crm",      label: "CRM" },
+    { key: "overview",   label: "Overview" },
+    { key: "products",   label: `Products${productCount > 0 ? ` (${productCount})` : ""}` },
+    { key: "pricing",    label: "Pricing" },
+    { key: "scraping",   label: "Scraping" },
+    { key: "crm",        label: "CRM" },
+    { key: "checklist",  label: "Checklist" },
+    { key: "reorders",   label: "Reorders" },
   ];
 
   return (
@@ -291,6 +337,9 @@ export default function SupplierDetailPage() {
         <div className="flex gap-2">
           <Link href="/suppliers">
             <Button variant="ghost" size="sm"><ArrowLeft className="h-4 w-4 mr-1" />Back</Button>
+          </Link>
+          <Link href={`/suppliers/${id}/emails`}>
+            <Button variant="outline" size="sm"><Mail className="h-4 w-4 mr-1" />Email Thread</Button>
           </Link>
           <Button size="sm" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending || !isDirty}>
             {saveMutation.isPending ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Save className="h-4 w-4 mr-1" />}
@@ -388,6 +437,35 @@ export default function SupplierDetailPage() {
                 <div>
                   <Label>Notes</Label>
                   <Textarea className="mt-1" rows={3} value={form.notes || ""} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="General notes about this supplier…" />
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <Label>Payment Terms</Label>
+                    <Input className="mt-1" value={form.payment_terms || ""} onChange={(e) => setForm({ ...form, payment_terms: e.target.value })} placeholder="Net 30, COD, etc." />
+                  </div>
+                  <div>
+                    <Label>Follow-up Date</Label>
+                    <Input className="mt-1" type="date" value={form.follow_up_date ? form.follow_up_date.slice(0, 10) : ""} onChange={(e) => setForm({ ...form, follow_up_date: e.target.value || null })} />
+                  </div>
+                </div>
+                <div>
+                  <Label>Product Categories (comma-separated)</Label>
+                  <Input
+                    className="mt-1"
+                    value={Array.isArray(form.product_categories) ? form.product_categories.join(", ") : (form.product_categories || "")}
+                    onChange={(e) => setForm({ ...form, product_categories: e.target.value.split(",").map((s: string) => s.trim()).filter(Boolean) })}
+                    placeholder="Electronics, Audio, Gaming"
+                  />
+                </div>
+                <div className="flex items-center gap-3">
+                  <input
+                    type="checkbox"
+                    id="map_enforced"
+                    checked={!!form.map_enforced}
+                    onChange={(e) => setForm({ ...form, map_enforced: e.target.checked })}
+                    className="rounded"
+                  />
+                  <Label htmlFor="map_enforced">MAP Enforced (Minimum Advertised Price)</Label>
                 </div>
               </CardContent>
             </Card>
@@ -1234,6 +1312,181 @@ export default function SupplierDetailPage() {
               </div>
             </CardContent>
           </Card>
+        </div>
+      )}
+
+      {/* ── CHECKLIST TAB ── */}
+      {tab === "checklist" && (
+        <div className="space-y-4 max-w-2xl">
+          <Card>
+            <CardHeader className="pb-4"><CardTitle className="text-base">Onboarding Checklist</CardTitle></CardHeader>
+            <CardContent className="space-y-4">
+              {/* Progress bar */}
+              {(checklistItems as any[]).length > 0 && (() => {
+                const total = (checklistItems as any[]).length;
+                const completed = (checklistItems as any[]).filter((i: any) => i.completed).length;
+                const pct = Math.round((completed / total) * 100);
+                return (
+                  <div>
+                    <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
+                      <span>{completed} of {total} completed</span>
+                      <span>{pct}%</span>
+                    </div>
+                    <div className="w-full h-2 bg-gray-100 rounded-full overflow-hidden">
+                      <div className="h-full bg-green-500 rounded-full transition-all" style={{ width: `${pct}%` }} />
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Items list */}
+              {(checklistItems as any[]).length === 0 ? (
+                <p className="text-sm text-gray-400 italic py-4 text-center">No checklist items yet. Add one below.</p>
+              ) : (
+                <div className="space-y-2">
+                  {(checklistItems as any[]).map((item: any) => (
+                    <div key={item.id} className="flex items-center gap-3 p-3 rounded-lg border border-gray-100 bg-gray-50">
+                      <button
+                        type="button"
+                        onClick={() => toggleChecklistMutation.mutate({ itemId: item.id, completed: !item.completed })}
+                        className={`w-5 h-5 rounded border-2 flex items-center justify-center flex-shrink-0 transition-colors ${item.completed ? "bg-green-500 border-green-500 text-white" : "border-gray-300 hover:border-green-400"}`}
+                      >
+                        {item.completed && <Check className="h-3 w-3" />}
+                      </button>
+                      <span className={`flex-1 text-sm ${item.completed ? "line-through text-gray-400" : "text-gray-800"}`}>{item.label}</span>
+                      <button
+                        type="button"
+                        onClick={() => deleteChecklistMutation.mutate(item.id)}
+                        className="text-gray-300 hover:text-red-500 transition-colors"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Add item */}
+              <div className="flex gap-2 pt-2 border-t">
+                <Input
+                  value={newChecklistLabel}
+                  onChange={(e) => setNewChecklistLabel(e.target.value)}
+                  placeholder="Add checklist item..."
+                  onKeyDown={(e) => { if (e.key === "Enter" && newChecklistLabel.trim()) { addChecklistMutation.mutate(newChecklistLabel.trim()); } }}
+                />
+                <Button
+                  size="sm"
+                  onClick={() => { if (newChecklistLabel.trim()) addChecklistMutation.mutate(newChecklistLabel.trim()); }}
+                  disabled={!newChecklistLabel.trim() || addChecklistMutation.isPending}
+                >
+                  {addChecklistMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {/* ── REORDERS TAB ── */}
+      {tab === "reorders" && (
+        <div className="space-y-4">
+          <div className="flex justify-end">
+            <Button size="sm" onClick={() => setShowReorderForm((v) => !v)}>
+              <Plus className="h-4 w-4 mr-1" />Log Reorder
+            </Button>
+          </div>
+
+          {showReorderForm && (
+            <Card className="border-blue-200">
+              <CardContent className="p-5 space-y-4">
+                <div className="flex items-center justify-between">
+                  <p className="font-semibold text-sm">New Purchase Order</p>
+                  <button onClick={() => setShowReorderForm(false)} className="text-gray-400 hover:text-gray-600"><X className="h-4 w-4" /></button>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <Label className="text-xs">PO Number</Label>
+                    <Input className="mt-1" value={reorderForm.po_number} onChange={(e) => setReorderForm({ ...reorderForm, po_number: e.target.value })} placeholder="PO-2024-001" />
+                  </div>
+                  <div>
+                    <Label className="text-xs">Status</Label>
+                    <select value={reorderForm.status} onChange={(e) => setReorderForm({ ...reorderForm, status: e.target.value })} className="mt-1 w-full border border-gray-300 rounded px-2 py-2 text-sm">
+                      <option>Pending</option>
+                      <option>Shipped</option>
+                      <option>Received</option>
+                      <option>Cancelled</option>
+                    </select>
+                  </div>
+                  <div>
+                    <Label className="text-xs">Order Date</Label>
+                    <Input className="mt-1" type="date" value={reorderForm.order_date} onChange={(e) => setReorderForm({ ...reorderForm, order_date: e.target.value })} />
+                  </div>
+                  <div>
+                    <Label className="text-xs">Expected Delivery</Label>
+                    <Input className="mt-1" type="date" value={reorderForm.expected_delivery} onChange={(e) => setReorderForm({ ...reorderForm, expected_delivery: e.target.value })} />
+                  </div>
+                </div>
+                <div>
+                  <Label className="text-xs">Notes</Label>
+                  <Input className="mt-1" value={reorderForm.notes} onChange={(e) => setReorderForm({ ...reorderForm, notes: e.target.value })} placeholder="Internal notes..." />
+                </div>
+                <div className="flex gap-2">
+                  <Button onClick={() => createReorderMutation.mutate()} disabled={createReorderMutation.isPending}>
+                    {createReorderMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : <Plus className="h-4 w-4 mr-1" />}Create PO
+                  </Button>
+                  <Button variant="outline" onClick={() => setShowReorderForm(false)}>Cancel</Button>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {(reorders as any[]).length === 0 ? (
+            <Card>
+              <CardContent className="p-12 text-center">
+                <Package className="h-10 w-10 mx-auto text-gray-300 mb-3" />
+                <p className="text-gray-500 font-medium">No reorders yet</p>
+                <p className="text-sm text-gray-400 mt-1">Click "Log Reorder" to create your first PO</p>
+              </CardContent>
+            </Card>
+          ) : (
+            <Card>
+              <CardContent className="p-0">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b bg-gray-50">
+                      <th className="text-left px-4 py-3 font-medium text-gray-600">PO #</th>
+                      <th className="text-left px-4 py-3 font-medium text-gray-600">Order Date</th>
+                      <th className="text-left px-4 py-3 font-medium text-gray-600">Expected Delivery</th>
+                      <th className="text-left px-4 py-3 font-medium text-gray-600">Status</th>
+                      <th className="text-left px-4 py-3 font-medium text-gray-600">Items</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(reorders as any[]).map((r: any) => (
+                      <tr key={r.id} className="border-b last:border-0 hover:bg-gray-50">
+                        <td className="px-4 py-3 font-mono text-xs">{r.po_number || "—"}</td>
+                        <td className="px-4 py-3 text-gray-500">{r.order_date ? new Date(r.order_date).toLocaleDateString() : "—"}</td>
+                        <td className="px-4 py-3 text-gray-500">{r.expected_delivery ? new Date(r.expected_delivery).toLocaleDateString() : "—"}</td>
+                        <td className="px-4 py-3">
+                          <select
+                            value={r.status}
+                            onChange={(e) => updateReorderStatusMutation.mutate({ reorderId: r.id, status: e.target.value })}
+                            className="border border-gray-200 rounded px-2 py-1 text-xs cursor-pointer"
+                          >
+                            <option>Pending</option>
+                            <option>Shipped</option>
+                            <option>Received</option>
+                            <option>Cancelled</option>
+                          </select>
+                        </td>
+                        <td className="px-4 py-3 text-gray-500">{(r.line_items || []).length} item{(r.line_items || []).length !== 1 ? "s" : ""}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </CardContent>
+            </Card>
+          )}
         </div>
       )}
     </PageShell>

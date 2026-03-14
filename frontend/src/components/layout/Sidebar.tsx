@@ -13,6 +13,8 @@ import {
   Sparkles,
   LogOut,
   FileText,
+  ShoppingCart,
+  ClipboardList,
 } from "lucide-react";
 import { clearToken } from "@/lib/auth";
 import { useRouter } from "next/navigation";
@@ -26,7 +28,9 @@ const navItems = [
   { href: "/templates", label: "Templates", icon: FileText },
   { href: "/pricing", label: "Pricing", icon: DollarSign },
   { href: "/suppliers", label: "Suppliers", icon: Truck },
+  { href: "/reorders", label: "Reorders", icon: ShoppingCart },
   { href: "/sync", label: "Shopify Sync", icon: RefreshCw },
+  { href: "/audit-log", label: "Audit Log", icon: ClipboardList },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 
