@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     storage_backend: str = "local"
     storage_path: str = "./uploads"
 
+    shopify_webhook_secret: str = ""
+
     secret_key: str = "change-this-in-production"
     cors_origins: List[str] = ["http://localhost:3000"]
     environment: str = "development"

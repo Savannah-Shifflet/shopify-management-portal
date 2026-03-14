@@ -15,6 +15,7 @@ import {
   FileText,
   ShoppingCart,
   ClipboardList,
+  Search,
 } from "lucide-react";
 import { clearToken } from "@/lib/auth";
 import { useRouter } from "next/navigation";
@@ -54,8 +55,20 @@ export function Sidebar() {
         <p className="text-xs text-slate-400 mt-0.5">E-commerce Manager</p>
       </div>
 
+      {/* Search trigger */}
+      <div className="px-3 pt-3 pb-1">
+        <button
+          onClick={() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true }))}
+          className="w-full flex items-center gap-2 px-3 py-1.5 rounded-md text-sm text-slate-400 hover:bg-slate-800 hover:text-slate-200 transition-colors border border-slate-700"
+        >
+          <Search className="h-3.5 w-3.5" />
+          <span>Search</span>
+          <kbd className="ml-auto text-xs bg-slate-800 border border-slate-600 rounded px-1">⌘K</kbd>
+        </button>
+      </div>
+
       {/* Nav */}
-      <nav className="flex-1 px-3 py-4 space-y-0.5">
+      <nav className="flex-1 px-3 py-2 space-y-0.5">
         {navItems.map(({ href, label, icon: Icon }) => {
           const active = href === "/" ? pathname === "/" : pathname.startsWith(href);
           return (

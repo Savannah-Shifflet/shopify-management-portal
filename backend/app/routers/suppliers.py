@@ -680,6 +680,43 @@ def update_reorder(supplier_id: UUID, reorder_id: UUID, payload: ReorderUpdate, 
     return {"id": str(r.id), "status": r.status}
 
 
+# ── AI reseller letter (US-402) ───────────────────────────────────────────────
+
+@router.post("/{supplier_id}/generate-letter")
+def generate_reseller_letter(
+    supplier_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    supplier = _get_or_404(supplier_id, current_user.id, db)
+    from app.models.store_settings import StoreSettings
+    from app.utils.claude_client import ClaudeClient
+
+    store = db.query(StoreSettings).filter(StoreSettings.user_id == current_user.id).first()
+    store_name = (store.store_name if store and store.store_name else "My Store")
+    owner_name = (store.owner_name if store and store.owner_name else "")
+    cats = ", ".join(supplier.product_categories or []) or "various products"
+
+    client = ClaudeClient()
+    prompt = (
+        f"Write a professional reseller inquiry letter from an authorized dealer to a potential supplier.\n\n"
+        f"Store: {store_name}\nOwner: {owner_name}\nSupplier/Brand: {supplier.name}\nCategories: {cats}\n\n"
+        f"The letter should:\n- Be professional and concise (3-4 paragraphs)\n"
+        f"- Introduce the store and its customer base\n"
+        f"- Express interest in becoming an authorized reseller\n"
+        f"- Request dealer/wholesale program info\n"
+        f"- Include a call to action\n\n"
+        f"Return ONLY the letter body. Use {{my_name}} as a placeholder for the signature name."
+    )
+    resp = client.message(
+        system="You write professional B2B business letters. Be concise and polished.",
+        content=[{"type": "text", "text": prompt}],
+        max_tokens=600,
+    )
+    body = resp.content[0].text
+    return {"subject": f"Reseller Inquiry — {supplier.name}", "body": body}
+
+
 def _get_or_404(supplier_id: UUID, user_id, db: Session) -> Supplier:
     s = db.query(Supplier).filter(
         Supplier.id == supplier_id, Supplier.user_id == user_id

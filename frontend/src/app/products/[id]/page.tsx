@@ -713,6 +713,20 @@ export default function ProductDetailPage() {
               <CardTitle className="text-base">Pricing</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
+              {/* MAP Warning */}
+              {(() => {
+                const bp = parseFloat(String(form.base_price ?? ""));
+                const mp = parseFloat(String(form.map_price ?? p.map_price ?? ""));
+                if (!isNaN(bp) && !isNaN(mp) && bp < mp) {
+                  return (
+                    <div className="flex items-start gap-2 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
+                      <span className="font-bold">⚠</span>
+                      <span>Price is below MAP (${mp.toFixed(2)}). Check your reseller agreement.</span>
+                    </div>
+                  );
+                }
+                return null;
+              })()}
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <Label className="text-xs">Cost Price</Label>
@@ -736,6 +750,32 @@ export default function ProductDetailPage() {
                     placeholder="0.00"
                   />
                 </div>
+              </div>
+              {/* Margin badge */}
+              {(() => {
+                const bp = parseFloat(String(form.base_price ?? ""));
+                const cp = parseFloat(String(form.cost_price ?? ""));
+                if (!isNaN(bp) && !isNaN(cp) && bp > 0 && cp > 0) {
+                  const margin = ((bp - cp) / bp) * 100;
+                  const cls = margin >= 25 ? "bg-green-100 text-green-700" : margin >= 10 ? "bg-amber-100 text-amber-700" : "bg-red-100 text-red-700";
+                  return (
+                    <p className="text-xs">
+                      Margin: <span className={`px-2 py-0.5 rounded font-medium ${cls}`}>{margin.toFixed(1)}%</span>
+                    </p>
+                  );
+                }
+                return null;
+              })()}
+              <div>
+                <Label className="text-xs">MAP (Min Advertised Price)</Label>
+                <Input
+                  className="mt-1"
+                  type="number"
+                  step="0.01"
+                  value={form.map_price ?? p.map_price ?? ""}
+                  onChange={(e) => setField("map_price", e.target.value)}
+                  placeholder="0.00"
+                />
               </div>
               <div>
                 <Label className="text-xs">Compare At Price</Label>

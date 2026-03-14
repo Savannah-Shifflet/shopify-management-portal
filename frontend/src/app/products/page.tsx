@@ -252,6 +252,7 @@ export default function ProductsPage() {
                   <th className="text-left px-4 py-3 font-medium text-gray-600">Sync</th>
                   <th className="text-left px-4 py-3 font-medium text-gray-600">Enrichment</th>
                   <th className="text-left px-4 py-3 font-medium text-gray-600">Price</th>
+                  <th className="text-left px-4 py-3 font-medium text-gray-600">Margin</th>
                   <th className="text-left px-4 py-3 font-medium text-gray-600">Type</th>
                 </tr>
               </thead>
@@ -315,6 +316,19 @@ export default function ProductsPage() {
                     </td>
                     <td className="px-4 py-3 text-gray-700">
                       {p.base_price ? formatPrice(Number(p.base_price)) : "—"}
+                    </td>
+                    <td className="px-4 py-3">
+                      {(p as any).margin_pct != null ? (
+                        <span className={cn("px-2 py-0.5 rounded text-xs font-medium",
+                          (p as any).margin_pct >= 25 ? "bg-green-100 text-green-700" :
+                          (p as any).margin_pct >= 10 ? "bg-amber-100 text-amber-700" :
+                          "bg-red-100 text-red-700"
+                        )}>
+                          {Number((p as any).margin_pct).toFixed(1)}%
+                        </span>
+                      ) : (
+                        <span className="text-gray-300 text-xs">—</span>
+                      )}
                     </td>
                     <td className="px-4 py-3 text-gray-500 text-xs">{p.product_type || "—"}</td>
                   </tr>

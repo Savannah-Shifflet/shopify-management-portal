@@ -222,3 +222,11 @@ export const storeSettingsApi = {
   update: (data: unknown) => api.patch("/store-settings/", data),
   testEmail: () => api.post("/store-settings/test-email"),
 };
+
+export const analyticsApi = {
+  orders: (days?: number) => api.get("/analytics/orders", { params: days ? { days } : {} }),
+};
+
+export const supplierLetterApi = {
+  generate: (supplierId: string) => api.post(`/suppliers/${supplierId}/generate-letter`),
+};

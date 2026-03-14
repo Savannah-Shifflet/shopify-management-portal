@@ -4,6 +4,7 @@ import { usePathname } from "next/navigation";
 import { Sidebar } from "./Sidebar";
 import { AuthGuard } from "./AuthGuard";
 import { ErrorBoundary } from "./ErrorBoundary";
+import { GlobalSearch } from "@/components/GlobalSearch";
 
 const AUTH_PATHS = ["/login", "/register"];
 
@@ -17,6 +18,7 @@ export function ClientLayout({ children }: { children: React.ReactNode }) {
 
   return (
     <AuthGuard>
+      <GlobalSearch />
       <div className="flex min-h-screen">
         <Sidebar />
         <main className="flex-1 overflow-hidden">

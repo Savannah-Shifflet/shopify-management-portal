@@ -11,6 +11,7 @@ from app.database import SessionLocal
 from app.routers import products, suppliers, pricing, imports, enrichment, sync, auth, templates
 from app.routers import settings as settings_router
 from app.routers import email_templates, reorders, audit, store_settings
+from app.routers import analytics, webhooks
 
 
 def _seed_stub_user():
@@ -80,6 +81,8 @@ app.include_router(email_templates.router)
 app.include_router(reorders.router)
 app.include_router(audit.router)
 app.include_router(store_settings.router)
+app.include_router(analytics.router)
+app.include_router(webhooks.router)
 
 
 @app.get("/health")
