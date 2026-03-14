@@ -1,0 +1,44 @@
+import uuid
+from datetime import datetime
+from sqlalchemy import Column, String, Boolean, Integer, DateTime, ForeignKey, Text, Numeric
+from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy.orm import relationship
+from app.database import Base
+
+
+class Supplier(Base):
+    __tablename__ = "suppliers"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    name = Column(String(255), nullable=False)
+    website_url = Column(Text)
+    # CSS selectors / XPath / pagination rules for scraping
+    scrape_config = Column(JSONB, default=dict)
+    # Default markup rules for this supplier
+    pricing_config = Column(JSONB, default=dict)
+    # Auto-approve price changes below this threshold (percent)
+    auto_approve_threshold = Column(String(10), default="0")
+    monitor_enabled = Column(Boolean, default=True)
+    monitor_interval = Column(Integer, default=1440)  # minutes
+    last_scraped_at = Column(DateTime)
+    notes = Column(Text)
+
+    # Fulfillment & listing settings
+    free_shipping = Column(Boolean, default=False)
+    avg_fulfillment_days = Column(Integer)          # typical days to ship
+    google_listings_approved = Column(Boolean, default=False)
+
+    # CRM — contacts list: [{name, email, phone, role}]
+    contacts = Column(JSONB, default=list)
+    # CRM — notes log: [{text, created_at}]
+    crm_notes = Column(JSONB, default=list)
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = relationship("User", back_populates="suppliers")
+    products = relationship("Product", back_populates="supplier", lazy="dynamic")
+    pricing_rules = relationship("PricingRule", back_populates="supplier", lazy="dynamic")
+    scrape_sessions = relationship("ScrapeSession", back_populates="supplier", lazy="dynamic")
+    detail_scrape_logs = relationship("DetailScrapeLog", back_populates="supplier", lazy="dynamic")
