@@ -83,7 +83,6 @@ def process_csv_import(self, job_id: str):
                         source_type=job.job_type,
                         status="draft",
                         sync_status="never_synced",
-                        enrichment_status="pending",
                     )
                     price_val = get_field("price")
                     if price_val:
@@ -207,7 +206,6 @@ def process_pdf_import(self, job_id: str):
                     source_type="pdf",
                     status="draft",
                     sync_status="never_synced",
-                    enrichment_status="pending",
                 )
                 if prod_data.get("price"):
                     try:
@@ -306,7 +304,7 @@ def process_image_batch(self, job_id: str, image_paths: list[str]):
                     seo_title=result.get("seo_title"),
                     seo_description=result.get("seo_description"),
                     source_type="image",
-                    status="enriched",
+                    status="draft",
                     enrichment_status="done",
                     enrichment_model="claude-sonnet-4-6",
                     enrichment_at=datetime.utcnow(),

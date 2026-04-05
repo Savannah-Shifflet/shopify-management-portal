@@ -14,5 +14,6 @@ class SupplierEmail(Base):
     body = Column(Text)
     sent_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     attachments = Column(JSONB, default=list)  # [{name, path, mime_type}]
+    message_id = Column(String(500), nullable=True, index=True)  # RFC 2822 Message-ID for dedup
 
     supplier = relationship("Supplier", back_populates="emails")

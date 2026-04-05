@@ -1,6 +1,7 @@
+import logging
 from typing import Optional
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -18,6 +19,8 @@ from app.schemas.product import (
     VariantCreate, VariantUpdate, VariantOut,
 )
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/v1/products", tags=["products"])
 
 
@@ -26,7 +29,7 @@ router = APIRouter(prefix="/api/v1/products", tags=["products"])
 @router.get("/", response_model=ProductListResponse)
 def list_products(
     page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=200),
+    page_size: int = Query(50, ge=1, le=10000),
     status: Optional[str] = None,
     sync_status: Optional[str] = None,
     enrichment_status: Optional[str] = None,
@@ -56,9 +59,28 @@ def list_products(
         .all()
     )
 
+    # Fetch store settings once for low_stock_threshold
+    from app.models.store_settings import StoreSettings
+    store_settings = db.query(StoreSettings).filter(
+        StoreSettings.user_id == current_user.id
+    ).first()
+    low_stock_threshold = (store_settings.low_stock_threshold if store_settings and store_settings.low_stock_threshold is not None else 5)
+
     items = []
     for p in products:
         thumbnail = p.images[0].src if p.images else None
+
+        # US-203: margin calculation
+        margin_pct = None
+        if p.cost_price and p.base_price and p.base_price > 0:
+            margin_pct = float((p.base_price - p.cost_price) / p.base_price * 100)
+
+        # US-301: low stock flag (sum across variants)
+        is_low_stock = None
+        if p.variants:
+            total_inventory = sum(v.inventory_quantity for v in p.variants)
+            is_low_stock = total_inventory <= low_stock_threshold
+
         items.append(
             ProductListOut(
                 id=p.id,
@@ -78,10 +100,15 @@ def list_products(
                 thumbnail=thumbnail,
                 body_html=p.body_html,
                 ai_description=p.ai_description,
+                margin_pct=margin_pct,
+                is_low_stock=is_low_stock,
+                applied_template_id=p.applied_template_id,
             )
         )
 
-    return ProductListResponse(items=items, total=total, page=page, page_size=page_size)
+    import math
+    pages = max(1, math.ceil(total / page_size))
+    return ProductListResponse(items=items, total=total, page=page, page_size=page_size, pages=pages)
 
 
 # ── Product CRUD ───────────────────────────────────────────────────────────────
@@ -109,7 +136,6 @@ def create_product(
         source_type=payload.source_type,
         status="draft",
         sync_status="never_synced",
-        enrichment_status="pending",
     )
     db.add(product)
     db.flush()
@@ -215,6 +241,7 @@ def get_product(
 def update_product(
     product_id: UUID,
     payload: ProductUpdate,
+    response: Response,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -226,24 +253,110 @@ def update_product(
 
     update_data = payload.model_dump(exclude_unset=True)
 
-    # Handle AI field acceptance
-    if update_data.pop("accept_ai_description", False) and product.ai_description:
-        product.body_html = product.ai_description
-    if update_data.pop("accept_ai_tags", False) and product.ai_tags:
-        product.tags = product.ai_tags
-    if update_data.pop("accept_ai_attributes", False) and product.ai_attributes:
-        if not product.metafields:
-            product.metafields = {}
-        product.metafields.update(product.ai_attributes)
+    # Capture price snapshots before any mutation so we can diff after
+    _price_snapshot = {
+        "base_price": product.base_price,
+        "cost_price": product.cost_price,
+        "supplier_price": product.supplier_price,
+    }
+
+    # Apply AI field acceptance (universal utility — handles all accept_ai_* flags)
+    from app.services.ai_acceptance import apply_ai_acceptance, SYNC_TRIGGER_FIELDS
+    ai_changed = apply_ai_acceptance(product, update_data)
 
     for field, value in update_data.items():
         setattr(product, field, value)
 
-    # If content changed and was synced, mark out of sync
-    if product.sync_status == "synced" and any(
-        f in update_data for f in ["title", "body_html", "tags", "vendor", "product_type"]
-    ):
+    # If content changed (directly or via AI acceptance) and was synced, mark out of sync
+    direct_content_change = any(f in update_data for f in SYNC_TRIGGER_FIELDS | {"vendor", "product_type"})
+    if product.sync_status == "synced" and (direct_content_change or ai_changed & SYNC_TRIGGER_FIELDS):
         product.sync_status = "out_of_sync"
+
+    # Sync variant prices when base_price is set while supplier price tracking is on,
+    # or when tracking is first enabled (so variants immediately reflect the new price).
+    if (
+        product.use_supplier_price
+        and product.base_price
+        and ("base_price" in update_data or "use_supplier_price" in update_data)
+    ):
+        from app.models.variant import ProductVariant as _PV
+        if product.supplier_id:
+            from app.services.pricing_service import calculate_retail_price
+            try:
+                result = calculate_retail_price(
+                    product.base_price, product.supplier_id,
+                    product.product_type, product.tags or [], db,
+                )
+                for v in product.variants:
+                    v.price = result["price"]
+            except Exception:
+                for v in product.variants:
+                    v.price = product.base_price
+        else:
+            for v in product.variants:
+                v.price = product.base_price
+
+    # US-202: MAP enforcement
+    price_fields_updated = any(f in update_data for f in ("base_price", "compare_at_price"))
+    if price_fields_updated and product.map_price is not None:
+        new_base = product.base_price
+        new_compare = product.compare_at_price
+        map_price = product.map_price
+        map_violated = (
+            (new_base is not None and new_base < map_price) or
+            (new_compare is not None and new_compare < map_price)
+        )
+        if map_violated:
+            # Check store settings for hard block
+            from app.models.store_settings import StoreSettings
+            from app.models.audit_log import AuditLog
+            from datetime import datetime as _dt
+
+            store = db.query(StoreSettings).filter(
+                StoreSettings.user_id == current_user.id
+            ).first()
+
+            # Log MAP violation to audit_log
+            try:
+                violation_log = AuditLog(
+                    user_id=current_user.id,
+                    action_type="map_violation",
+                    entity_type="Product",
+                    entity_id=str(product_id),
+                    description=(
+                        f"MAP violation: base_price={new_base}, compare_at_price={new_compare}, "
+                        f"map_price={map_price}"
+                    ),
+                    timestamp=_dt.utcnow(),
+                )
+                db.add(violation_log)
+            except Exception:
+                logger.warning("Failed to log MAP violation to audit_log", exc_info=True)
+
+            if store and store.map_hard_block:
+                db.rollback()
+                raise HTTPException(status_code=422, detail="Price is below MAP")
+
+            # Soft warning: save but set header
+            response.headers["X-MAP-Warning"] = "true"
+
+    # Record price history for any price fields that changed
+    _price_fields_to_track = {
+        "base_price": ("retail", None),
+        "cost_price": ("cost", None),
+        "supplier_price": ("supplier", product.supplier_id),
+    }
+    for field, (price_type, supplier_id) in _price_fields_to_track.items():
+        if field in update_data:
+            old_val = _price_snapshot[field]
+            new_val = getattr(product, field)
+            if old_val != new_val and new_val is not None:
+                from app.services.pricing_service import record_price_history
+                record_price_history(
+                    db, product.id, old_val, new_val,
+                    source="manual", price_type=price_type,
+                    supplier_id=supplier_id,
+                )
 
     db.commit()
     db.refresh(product)
@@ -316,8 +429,8 @@ def bulk_action(
 
     if payload.action == "approve":
         for p in products:
-            if p.status in ("draft", "enriched"):
-                p.status = "approved"
+            if p.status != "archived":
+                p.status = "active"
     elif payload.action == "archive":
         for p in products:
             p.status = "archived"
@@ -330,6 +443,7 @@ def bulk_action(
         from app.workers.enrichment_tasks import enrich_product
         task_ids = []
         for p in products:
+            p.enrichment_status = "pending"
             task = enrich_product.delay(str(p.id))
             task_ids.append(task.id)
         db.commit()
@@ -474,11 +588,40 @@ def merge_products(
         source = next((p for p in [primary] + secondaries if p.id == source_pid), None)
         primary.tags = list(source.tags or []) if source else (primary.tags or [])
 
+    # ── Shopify product ID reconciliation ────────────────────────────────────────
+    # Collect secondary shopify IDs before they're cascade-deleted
+    orphaned_shopify_ids: list[int] = []
+    for sec in secondaries:
+        if not sec.shopify_product_id:
+            continue
+        if not primary.shopify_product_id:
+            # Primary has no Shopify link — inherit secondary's so sync updates the
+            # existing product and pull-from-Shopify matches by ID (no re-import).
+            primary.shopify_product_id = sec.shopify_product_id
+            primary.shopify_hash = None  # force re-sync with merged content
+        else:
+            # Both have Shopify products — queue deletion of the orphaned secondary
+            # so pull-from-Shopify doesn't re-create it as a duplicate.
+            orphaned_shopify_ids.append(sec.shopify_product_id)
+
+    # Mark primary out-of-sync (content changed via merge) and clear hash so
+    # sync_tasks doesn't skip it due to a stale matching hash.
+    primary.shopify_hash = None
+    if primary.sync_status == "synced":
+        primary.sync_status = "out_of_sync"
+
     # ── Delete secondaries (cascades remaining orphan images/variants) ───────────
     for sec in secondaries:
         db.delete(sec)
 
     db.commit()
+
+    # Queue Shopify deletions after commit (IDs are stable, secondaries gone locally)
+    if orphaned_shopify_ids:
+        from app.workers.sync_tasks import delete_shopify_product
+        for shopify_id in orphaned_shopify_ids:
+            delete_shopify_product.delay(str(primary.user_id), shopify_id)
+
     return {"primary_id": str(primary.id), "merged": len(secondary_ids)}
 
 
@@ -490,6 +633,7 @@ def list_variants(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    _get_product_or_404(product_id, current_user.id, db)
     return db.query(ProductVariant).filter(
         ProductVariant.product_id == product_id
     ).order_by(ProductVariant.position).all()
@@ -519,6 +663,7 @@ def update_variant(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    product = _get_product_or_404(product_id, current_user.id, db)
     variant = db.query(ProductVariant).filter(
         ProductVariant.id == variant_id, ProductVariant.product_id == product_id
     ).first()
@@ -526,6 +671,8 @@ def update_variant(
         raise HTTPException(status_code=404, detail="Variant not found")
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(variant, field, value)
+    if product.sync_status == "synced":
+        product.sync_status = "out_of_sync"
     db.commit()
     db.refresh(variant)
     return variant
@@ -538,6 +685,7 @@ def delete_variant(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    _get_product_or_404(product_id, current_user.id, db)
     variant = db.query(ProductVariant).filter(
         ProductVariant.id == variant_id, ProductVariant.product_id == product_id
     ).first()
@@ -555,6 +703,7 @@ def list_images(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    _get_product_or_404(product_id, current_user.id, db)
     return db.query(ProductImage).filter(
         ProductImage.product_id == product_id
     ).order_by(ProductImage.position).all()
@@ -596,12 +745,28 @@ def delete_image(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    product = _get_product_or_404(product_id, current_user.id, db)
     image = db.query(ProductImage).filter(
         ProductImage.id == image_id, ProductImage.product_id == product_id
     ).first()
     if not image:
         raise HTTPException(status_code=404, detail="Image not found")
+
+    shopify_image_id = image.shopify_image_id
     db.delete(image)
+
+    # If the image was synced to Shopify, delete it there immediately
+    if shopify_image_id and product.shopify_product_id:
+        try:
+            from app.utils.shopify_client import ShopifyClient
+            client = ShopifyClient.from_user(current_user, db=db)
+            client.delete_product_image(shopify_image_id)
+        except Exception as e:
+            # Shopify deletion failed — mark product out of sync so it gets reconciled on next sync
+            import logging
+            logging.getLogger(__name__).warning(f"Shopify image delete failed (marking out_of_sync): {e}")
+            product.sync_status = "out_of_sync"
+
     db.commit()
 
 
@@ -613,6 +778,7 @@ def price_history(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    _get_product_or_404(product_id, current_user.id, db)
     return db.query(PriceHistory).filter(
         PriceHistory.product_id == product_id
     ).order_by(PriceHistory.created_at.asc()).limit(100).all()

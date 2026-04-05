@@ -38,8 +38,8 @@ export function MergeFieldRow({ label, fieldKey, products, selectedProductId, on
             <div className="flex items-start gap-2">
               <input
                 type="radio"
-                readOnly
                 checked={isSelected}
+                onChange={() => onChange(p.id)}
                 className="mt-0.5 shrink-0 accent-blue-600"
               />
               {display != null ? (

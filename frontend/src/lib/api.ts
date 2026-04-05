@@ -173,6 +173,7 @@ export const syncApi = {
   log: (params?: Record<string, unknown>) => api.get("/sync/log", { params }),
   testConnection: () => api.get("/sync/shopify/connection"),
   pullFromShopify: () => api.post("/sync/shopify/pull"),
+  collections: () => api.get("/sync/shopify/collections"),
 };
 
 // Supplier SRM extensions
@@ -200,6 +201,10 @@ export const supplierSrmApi = {
   createReorder: (id: string, data: unknown) => api.post(`/suppliers/${id}/reorders`, data),
   updateReorder: (id: string, reorderId: string, data: unknown) =>
     api.patch(`/suppliers/${id}/reorders/${reorderId}`, data),
+  // Bulk email + inbox sync
+  bulkEmail: (data: { supplier_ids: string[]; subject: string; body: string; template_id?: string }) =>
+    api.post("/suppliers/bulk-email", data),
+  syncInbox: () => api.post("/suppliers/sync-inbox"),
 };
 
 export const emailTemplatesApi = {
@@ -211,6 +216,11 @@ export const emailTemplatesApi = {
 
 export const reordersApi = {
   list: () => api.get("/reorders/"),
+};
+
+export const supplierImportApi = {
+  importCsv: (formData: FormData) =>
+    api.post("/suppliers/import-csv", formData, { headers: { "Content-Type": "multipart/form-data" } }),
 };
 
 export const auditApi = {

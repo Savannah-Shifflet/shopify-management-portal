@@ -57,6 +57,12 @@ class ReorderUpdate(BaseModel):
     expected_delivery: Optional[str] = None
     notes: Optional[str] = None
 
+class BulkEmailIn(BaseModel):
+    supplier_ids: list[str]
+    subject: str
+    body: str  # may contain {{supplier_name}} placeholder; backend substitutes per recipient
+    template_id: Optional[str] = None
+
 
 @router.get("/", response_model=list[SupplierOut])
 def list_suppliers(
@@ -132,6 +138,7 @@ def supplier_stats(
 
     products = db.query(Product).filter(
         Product.supplier_id == supplier_id,
+        Product.user_id == current_user.id,
         Product.status != "archived",
     ).all()
 
@@ -269,7 +276,11 @@ def scrape_session_items(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Return the QA-filtered raw items stored in a scrape session."""
+    """Return the QA-filtered raw items stored in a scrape session.
+
+    Each item is annotated with `already_imported: bool` so the UI can indicate
+    which products are already in the catalog (matched by source_url + supplier_id).
+    """
     _get_or_404(supplier_id, current_user.id, db)
     from app.models.scrape_session import ScrapeSession
     session = db.query(ScrapeSession).filter(
@@ -278,7 +289,25 @@ def scrape_session_items(
     ).first()
     if not session:
         raise HTTPException(status_code=404, detail="Scrape session not found")
-    return {"items": session.raw_data or [], "total": len(session.raw_data or [])}
+
+    raw = session.raw_data or []
+
+    # Build a set of source_urls already imported from this supplier
+    existing_urls: set[str] = set()
+    if raw and supplier_id:
+        urls_in_session = {item["url"] for item in raw if item.get("url")}
+        if urls_in_session:
+            existing = db.query(Product).filter(
+                Product.supplier_id == supplier_id,
+                Product.source_url.in_(urls_in_session),
+            ).with_entities(Product.source_url).all()
+            existing_urls = {row.source_url for row in existing}
+
+    annotated = [
+        {**item, "already_imported": bool(item.get("url") and item["url"] in existing_urls)}
+        for item in raw
+    ]
+    return {"items": annotated, "total": len(annotated)}
 
 
 @router.post("/{supplier_id}/scrape-sessions/{session_id}/approve")
@@ -717,6 +746,72 @@ def generate_reseller_letter(
     return {"subject": f"Reseller Inquiry — {supplier.name}", "body": body}
 
 
+# ── CSV import for supplier leads (US-103) ────────────────────────────────────
+
+@router.post("/import-csv")
+async def import_suppliers_csv(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Import supplier leads from a CSV file. Skips duplicates by email."""
+    import csv, io
+    content = await file.read()
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = content.decode("latin-1")
+
+    reader = csv.DictReader(io.StringIO(text))
+    rows = list(reader)
+    if not rows:
+        return {"added": 0, "skipped": 0, "errors": 0, "total": 0}
+
+    # Normalize header names
+    def _find(row, *keys):
+        for k in keys:
+            for col in row:
+                if col.strip().lower() == k.lower():
+                    return row[col].strip() if row[col] else ""
+        return ""
+
+    added = skipped = errors = 0
+    for row in rows:
+        try:
+            name = _find(row, "company name", "company", "name")
+            email = _find(row, "email", "contact email", "company email")
+            if not name:
+                errors += 1
+                continue
+            # Duplicate check by email
+            if email:
+                existing = db.query(Supplier).filter(
+                    Supplier.user_id == current_user.id,
+                    Supplier.company_email == email,
+                ).first()
+                if existing:
+                    skipped += 1
+                    continue
+            supplier = Supplier(
+                user_id=current_user.id,
+                name=name,
+                company_email=email or None,
+                contact_name=_find(row, "contact name", "contact") or None,
+                phone=_find(row, "phone", "telephone") or None,
+                website_url=_find(row, "website", "website url", "url") or None,
+                notes=_find(row, "notes", "note") or None,
+                status="LEAD",
+                product_categories=[c.strip() for c in _find(row, "product categories", "categories").split(",") if c.strip()] or [],
+            )
+            db.add(supplier)
+            added += 1
+        except Exception:
+            errors += 1
+
+    db.commit()
+    return {"added": added, "skipped": skipped, "errors": errors, "total": len(rows)}
+
+
 def _get_or_404(supplier_id: UUID, user_id, db: Session) -> Supplier:
     s = db.query(Supplier).filter(
         Supplier.id == supplier_id, Supplier.user_id == user_id
@@ -736,3 +831,98 @@ def _audit(db, user_id, action_type: str, entity_type: str, entity_id: str, desc
         db.commit()
     except Exception:
         pass
+
+
+# ── Bulk email outreach ────────────────────────────────────────────────────────
+
+@router.post("/bulk-email")
+def bulk_email(
+    payload: BulkEmailIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Send an email to multiple suppliers. Substitutes {{supplier_name}} per recipient."""
+    import time
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+    from datetime import datetime as _dt
+    from app.models.store_settings import StoreSettings
+    from app.models.supplier_email import SupplierEmail
+
+    settings = db.query(StoreSettings).filter(StoreSettings.user_id == current_user.id).first()
+    if not settings or not settings.smtp_host:
+        raise HTTPException(status_code=400, detail="SMTP not configured. Go to Settings to configure email.")
+
+    suppliers = db.query(Supplier).filter(
+        Supplier.id.in_([UUID(sid) for sid in payload.supplier_ids]),
+        Supplier.user_id == current_user.id,
+    ).all()
+
+    results = []
+    sent = failed = skipped = 0
+
+    for supplier in suppliers:
+        if not supplier.company_email:
+            results.append({"id": str(supplier.id), "name": supplier.name, "status": "skipped", "reason": "no email"})
+            skipped += 1
+            continue
+
+        # Substitute {{supplier_name}} in subject and body
+        subject = payload.subject.replace("{{supplier_name}}", supplier.name)
+        body = payload.body.replace("{{supplier_name}}", supplier.name)
+
+        try:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = subject
+            msg["From"] = f"{settings.smtp_from_name or 'ProductHub'} <{settings.smtp_from_email}>"
+            msg["To"] = supplier.company_email
+            msg.attach(MIMEText(body, "html"))
+
+            with smtplib.SMTP(settings.smtp_host, settings.smtp_port or 587) as server:
+                server.starttls()
+                if settings.smtp_user and settings.smtp_password:
+                    server.login(settings.smtp_user, settings.smtp_password)
+                server.sendmail(settings.smtp_from_email, supplier.company_email, msg.as_string())
+
+            email_record = SupplierEmail(
+                supplier_id=supplier.id,
+                direction="OUTBOUND",
+                subject=subject,
+                body=body,
+                sent_at=_dt.utcnow(),
+            )
+            db.add(email_record)
+            if supplier.status == "LEAD":
+                supplier.status = "CONTACTED"
+
+            results.append({"id": str(supplier.id), "name": supplier.name, "status": "sent"})
+            sent += 1
+
+            # Brief delay between sends to avoid rate-limiting
+            time.sleep(0.5)
+
+        except Exception as e:
+            results.append({"id": str(supplier.id), "name": supplier.name, "status": "failed", "reason": str(e)})
+            failed += 1
+
+    db.commit()
+    _audit(db, current_user.id, "BULK_EMAIL_SENT", "Supplier", "",
+           f"Bulk email sent to {sent} suppliers (failed: {failed}, skipped: {skipped})")
+
+    return {"sent": sent, "failed": failed, "skipped": skipped, "results": results}
+
+
+# ── IMAP inbox sync ────────────────────────────────────────────────────────────
+
+@router.post("/sync-inbox")
+def sync_inbox(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Manually trigger IMAP inbox sync for the current user."""
+    from app.workers.email_tasks import run_imap_sync
+    result = run_imap_sync(str(current_user.id), db)
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result

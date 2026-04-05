@@ -10,14 +10,15 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
 import { BulkEnrichDialog } from "@/components/products/BulkEnrichDialog";
+import { BulkPriceDialog } from "@/components/products/BulkPriceDialog";
 import {
   Plus, Search, Sparkles, RefreshCw, CheckCircle, Archive,
-  ChevronLeft, ChevronRight, Package, GitMerge, AlertTriangle, X,
+  ChevronLeft, ChevronRight, Package, GitMerge, AlertTriangle, X, DollarSign,
 } from "lucide-react";
 import { cn, formatPrice, statusColor } from "@/lib/utils";
 import type { ProductListItem } from "@/types/product";
 
-const STATUS_FILTERS = ["all", "draft", "enriched", "approved", "synced", "archived"];
+const STATUS_FILTERS = ["all", "draft", "active", "archived"];
 
 type DuplicateGroup = {
   sku: string;
@@ -40,6 +41,9 @@ export default function ProductsPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [showDuplicatesDialog, setShowDuplicatesDialog] = useState(false);
   const [showEnrichDialog, setShowEnrichDialog] = useState(false);
+  const [showPriceDialog, setShowPriceDialog] = useState(false);
+  const [tagInput, setTagInput] = useState("");
+  const [showTagInput, setShowTagInput] = useState(false);
 
   const { data, isLoading } = useQuery({
     queryKey: ["products", { page, search, status: statusFilter === "all" ? undefined : statusFilter }],
@@ -71,8 +75,8 @@ export default function ProductsPage() {
   }
 
   const bulkMutation = useMutation({
-    mutationFn: (action: string) =>
-      productsApi.bulk({ product_ids: [...selected], action }),
+    mutationFn: ({ action, tag }: { action: string; tag?: string }) =>
+      productsApi.bulk({ product_ids: [...selected], action, tag }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["products"] });
       setSelected(new Set());
@@ -182,31 +186,43 @@ export default function ProductsPage() {
             </Button>
             <Button
               size="sm" variant="outline"
-              onClick={() => bulkMutation.mutate("approve")}
-              disabled={bulkMutation.isPending}
+              onClick={() => setShowPriceDialog(true)}
             >
-              <CheckCircle className="h-3.5 w-3.5 mr-1" /> Approve
+              <DollarSign className="h-3.5 w-3.5 mr-1" /> Adjust Price
             </Button>
             <Button
               size="sm" variant="outline"
-              onClick={() => bulkMutation.mutate("rescrape")}
+              onClick={() => bulkMutation.mutate({ action: "approve" })}
+              disabled={bulkMutation.isPending}
+            >
+              <CheckCircle className="h-3.5 w-3.5 mr-1" /> Set Active
+            </Button>
+            <Button
+              size="sm" variant="outline"
+              onClick={() => bulkMutation.mutate({ action: "rescrape" })}
               disabled={bulkMutation.isPending}
             >
               <RefreshCw className="h-3.5 w-3.5 mr-1" /> Re-scrape
             </Button>
             <Button
               size="sm" variant="outline"
-              onClick={() => bulkMutation.mutate("sync")}
+              onClick={() => bulkMutation.mutate({ action: "sync" })}
               disabled={bulkMutation.isPending}
             >
               <RefreshCw className="h-3.5 w-3.5 mr-1" /> Sync
             </Button>
             <Button
               size="sm" variant="outline"
-              onClick={() => bulkMutation.mutate("archive")}
+              onClick={() => bulkMutation.mutate({ action: "archive" })}
               disabled={bulkMutation.isPending}
             >
               <Archive className="h-3.5 w-3.5 mr-1" /> Archive
+            </Button>
+            <Button
+              size="sm" variant="outline"
+              onClick={() => setShowTagInput((v) => !v)}
+            >
+              # Tag
             </Button>
             {selected.size >= 2 && (
               <Button
@@ -218,6 +234,30 @@ export default function ProductsPage() {
               </Button>
             )}
           </div>
+        </div>
+      )}
+
+      {/* Bulk tag input */}
+      {showTagInput && selected.size > 0 && (
+        <div className="mb-3 flex items-center gap-2 p-2 bg-white border rounded-lg">
+          <span className="text-xs text-gray-500 whitespace-nowrap">Apply tag to {selected.size} products:</span>
+          <Input
+            className="h-7 text-xs flex-1"
+            placeholder="tag name"
+            value={tagInput}
+            onChange={(e) => setTagInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && tagInput.trim()) {
+                bulkMutation.mutate({ action: "tag", tag: tagInput.trim() });
+                setTagInput("");
+                setShowTagInput(false);
+              }
+            }}
+          />
+          <Button size="sm" className="h-7 text-xs" onClick={() => { if (tagInput.trim()) { bulkMutation.mutate({ action: "tag", tag: tagInput.trim() }); setTagInput(""); setShowTagInput(false); } }}>
+            Apply
+          </Button>
+          <button onClick={() => setShowTagInput(false)} className="text-gray-400 hover:text-gray-600"><X className="h-4 w-4" /></button>
         </div>
       )}
 
@@ -428,6 +468,19 @@ export default function ProductsPage() {
             setShowEnrichDialog(false);
             setSelected(new Set());
           }}
+        />
+      )}
+
+      {showPriceDialog && (
+        <BulkPriceDialog
+          products={items.filter((p) => selected.has(p.id)).map((p) => ({
+            id: p.id,
+            title: p.title,
+            base_price: p.base_price ? Number(p.base_price) : null,
+            cost_price: (p as any).cost_price ? Number((p as any).cost_price) : null,
+            map_price: (p as any).map_price ? Number((p as any).map_price) : null,
+          }))}
+          onClose={() => { setShowPriceDialog(false); setSelected(new Set()); }}
         />
       )}
 

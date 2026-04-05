@@ -101,12 +101,30 @@ class PricingScheduleOut(PricingScheduleBase):
 
 class PriceCalculateRequest(BaseModel):
     cost_price: Decimal
-    supplier_id: UUID
+    supplier_id: Optional[UUID] = None
     product_type: Optional[str] = None
     tags: Optional[list[str]] = None
+    shipping_cost: Optional[Decimal] = None
 
 
 class PriceCalculateResponse(BaseModel):
     cost_price: Decimal
+    shipping_cost: Optional[Decimal] = None
+    effective_cost: Decimal
     calculated_price: Decimal
     rule_applied: Optional[str] = None
+    margin_pct: Optional[float] = None
+
+
+class BulkPriceUpdateRequest(BaseModel):
+    product_ids: list[UUID]
+    # price_type: which price field to update
+    price_type: str  # base_price | cost_price | map_price | shipping_cost
+    # action: how to set the new value
+    action: str  # set | percent_markup | percent_off | fixed_off
+    value: Decimal  # the numeric value for the action
+
+
+class BulkPriceUpdateResponse(BaseModel):
+    updated: int
+    skipped: int

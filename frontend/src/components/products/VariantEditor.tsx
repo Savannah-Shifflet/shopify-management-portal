@@ -116,6 +116,7 @@ export function VariantEditor({ productId, variants: initialVariants, options }:
                 {hasOpt2 && <th className="text-left px-3 py-2 font-medium text-gray-500 text-xs">{opt2Label}</th>}
                 {hasOpt3 && <th className="text-left px-3 py-2 font-medium text-gray-500 text-xs">{opt3Label}</th>}
                 <th className="text-left px-3 py-2 font-medium text-gray-500 text-xs">Price</th>
+                <th className="text-left px-3 py-2 font-medium text-gray-500 text-xs">Compare At</th>
                 <th className="text-left px-3 py-2 font-medium text-gray-500 text-xs">Cost</th>
                 <th className="text-left px-3 py-2 font-medium text-gray-500 text-xs">Inventory</th>
                 <th className="w-10"></th>
@@ -170,6 +171,18 @@ export function VariantEditor({ productId, variants: initialVariants, options }:
                         step="0.01"
                         value={v.price ?? ""}
                         onChange={(e) => updateRow(v.id, "price", e.target.value)}
+                      />
+                    </div>
+                  </td>
+                  <td className="px-3 py-2">
+                    <div className="relative">
+                      <span className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-400 text-xs">$</span>
+                      <Input
+                        className="h-8 text-xs pl-5"
+                        type="number"
+                        step="0.01"
+                        value={v.compare_at_price ?? ""}
+                        onChange={(e) => updateRow(v.id, "compare_at_price", e.target.value || null)}
                       />
                     </div>
                   </td>

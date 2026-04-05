@@ -107,7 +107,8 @@ def get_order_analytics(
         reverse=True,
     )[:10]
 
-    # Revenue by supplier — join sku → Product → Supplier
+    # Revenue by supplier — join sku → ProductVariant → Product → Supplier
+    from app.models.variant import ProductVariant
     supplier_revenue: dict[str, float] = defaultdict(float)
     for sku, data in sku_revenue.items():
         product = (
@@ -115,12 +116,15 @@ def get_order_analytics(
             .join(Product.variants)
             .filter(
                 Product.user_id == current_user.id,
-                # ProductVariant.sku == sku  -- avoid circular import; match by title/sku heuristic
+                ProductVariant.sku == sku,
             )
             .first()
         )
         if product and product.supplier_id:
-            supplier = db.query(Supplier).filter(Supplier.id == product.supplier_id).first()
+            supplier = db.query(Supplier).filter(
+                Supplier.id == product.supplier_id,
+                Supplier.user_id == current_user.id,
+            ).first()
             supplier_name = supplier.name if supplier else "Unknown"
             supplier_revenue[supplier_name] += data["revenue"]
         else:

@@ -1,3 +1,4 @@
+from decimal import Decimal
 from typing import Optional
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -84,7 +85,7 @@ def sync_all(
     from app.workers.sync_tasks import sync_product_to_shopify
     products = db.query(Product).filter(
         Product.user_id == current_user.id,
-        Product.status == "approved",
+        Product.status.in_(["draft", "active"]),
         Product.sync_status.in_(["never_synced", "out_of_sync", "failed"]),
     ).all()
     task_ids = []
@@ -113,6 +114,20 @@ def sync_log(
         .limit(page_size)
         .all()
     )
+
+
+@router.get("/shopify/collections")
+def get_collections(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Fetch all Shopify collections with their automation rules."""
+    from app.utils.shopify_client import ShopifyClient
+    try:
+        client = ShopifyClient.from_user(current_user, db=db)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return client.get_all_collections()
 
 
 @router.get("/shopify/connection")
@@ -196,9 +211,10 @@ def pull_from_shopify(
         ]
 
         if existing:
-            # Update shopify_product_id and sync status
+            # Update shopify_product_id, sync status, and product status
             existing.shopify_product_id = shopify_id
             existing.sync_status = "synced"
+            existing.status = sp.get("status", "active")
             existing.title = title
             existing.body_html = sp.get("body_html") or existing.body_html
             existing.vendor = sp.get("vendor") or existing.vendor
@@ -208,6 +224,13 @@ def pull_from_shopify(
                 existing.tags = tags_list
             if options_list:
                 existing.options = options_list
+            # Populate product-level pricing from first variant if not already set
+            if variants:
+                fv = variants[0]
+                if not existing.base_price and fv.get("price"):
+                    existing.base_price = Decimal(str(fv["price"]))
+                if not existing.compare_at_price and fv.get("compare_at_price"):
+                    existing.compare_at_price = Decimal(str(fv["compare_at_price"]))
             # Update variant shopify IDs
             for sv in variants:
                 sv_sku = sv.get("sku", "")
@@ -280,10 +303,11 @@ def pull_from_shopify(
                 handle=sp.get("handle") or "",
                 tags=tags_list or None,
                 options=options_list or None,
-                status="synced",
+                status=sp.get("status", "draft"),
                 sync_status="synced",
-                enrichment_status="pending",
                 source_type="shopify_pull",
+                base_price=Decimal(str(variants[0]["price"])) if variants and variants[0].get("price") else None,
+                compare_at_price=Decimal(str(variants[0]["compare_at_price"])) if variants and variants[0].get("compare_at_price") else None,
             )
             db.add(product)
             db.flush()

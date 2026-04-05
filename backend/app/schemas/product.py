@@ -3,7 +3,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Optional
 from uuid import UUID
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 
 # ── Variant ──────────────────────────────────────────────────────────────────
@@ -90,6 +90,7 @@ class ProductBase(BaseModel):
     map_price: Optional[Decimal] = None
     base_price: Optional[Decimal] = None
     compare_at_price: Optional[Decimal] = None
+    shipping_cost: Optional[Decimal] = None
     metafields: Optional[dict] = None
 
 
@@ -113,11 +114,18 @@ class ProductUpdate(BaseModel):
     map_price: Optional[Decimal] = None
     base_price: Optional[Decimal] = None
     compare_at_price: Optional[Decimal] = None
+    shipping_cost: Optional[Decimal] = None
     seo_title: Optional[str] = None
     seo_description: Optional[str] = None
     metafields: Optional[dict] = None
     use_supplier_price: Optional[bool] = None
-    # Accept AI fields into main fields
+    # Direct AI field overrides (e.g. clearing after a rejected enrichment)
+    ai_title: Optional[str] = None
+    ai_description: Optional[str] = None
+    applied_template_id: Optional[UUID] = None
+    enrichment_status: Optional[str] = None
+    # Accept AI suggestions into main fields
+    accept_ai_title: Optional[bool] = None
     accept_ai_description: Optional[bool] = None
     accept_ai_tags: Optional[bool] = None
     accept_ai_attributes: Optional[bool] = None
@@ -131,6 +139,7 @@ class ProductOut(ProductBase):
     status: str
     source_type: Optional[str] = None
     source_url: Optional[str] = None
+    ai_title: Optional[str] = None
     ai_description: Optional[str] = None
     ai_tags: Optional[list[str]] = None
     ai_attributes: Optional[dict] = None
@@ -138,6 +147,7 @@ class ProductOut(ProductBase):
     seo_description: Optional[str] = None
     enrichment_status: str
     enrichment_at: Optional[datetime] = None
+    applied_template_id: Optional[UUID] = None
     supplier_price: Optional[Decimal] = None
     supplier_price_at: Optional[datetime] = None
     use_supplier_price: bool = False
@@ -147,6 +157,13 @@ class ProductOut(ProductBase):
     updated_at: Optional[datetime] = None
     variants: list[VariantOut] = []
     images: list[ImageOut] = []
+
+    @computed_field
+    @property
+    def margin_pct(self) -> Optional[float]:
+        if self.cost_price and self.base_price and self.base_price > 0:
+            return float((self.base_price - self.cost_price) / self.base_price * 100)
+        return None
 
     model_config = {"from_attributes": True}
 
@@ -160,6 +177,9 @@ class ProductListOut(BaseModel):
     product_type: Optional[str] = None
     vendor: Optional[str] = None
     base_price: Optional[Decimal] = None
+    cost_price: Optional[Decimal] = None
+    map_price: Optional[Decimal] = None
+    shipping_cost: Optional[Decimal] = None
     supplier_price: Optional[Decimal] = None
     supplier_id: Optional[UUID] = None
     shopify_product_id: Optional[int] = None
@@ -171,6 +191,11 @@ class ProductListOut(BaseModel):
     # AI enrichment fields (needed for template review)
     body_html: Optional[str] = None
     ai_description: Optional[str] = None
+    # Template tracking
+    applied_template_id: Optional[UUID] = None
+    # Computed fields
+    margin_pct: Optional[float] = None
+    is_low_stock: Optional[bool] = None
 
     model_config = {"from_attributes": True}
 
@@ -180,6 +205,7 @@ class ProductListResponse(BaseModel):
     total: int
     page: int
     page_size: int
+    pages: int
 
 
 class BulkActionRequest(BaseModel):

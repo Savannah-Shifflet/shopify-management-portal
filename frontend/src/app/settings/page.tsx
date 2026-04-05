@@ -8,7 +8,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Wifi, WifiOff, Loader2, Unplug, CheckCircle } from "lucide-react";
+import { Wifi, WifiOff, Loader2, Unplug, CheckCircle, RefreshCw, Inbox } from "lucide-react";
+import { supplierSrmApi } from "@/lib/api";
 
 export default function SettingsPage() {
   const qc = useQueryClient();
@@ -19,28 +20,26 @@ export default function SettingsPage() {
   const [storeForm, setStoreForm] = useState<any>(null);
   const [storeSaved, setStoreSaved] = useState(false);
   const [testEmailResult, setTestEmailResult] = useState<string | null>(null);
+  const [syncResult, setSyncResult] = useState<string | null>(null);
 
   const { data: shopify, isLoading } = useQuery({
     queryKey: ["shopify-settings"],
     queryFn: () => settingsApi.getShopify().then((r) => r.data),
   });
 
-  const connectMutation = useMutation({
-    mutationFn: (domain: string) => settingsApi.connectShopify(domain),
-    onSuccess: () => {
-      setConnectError(null);
-      setStoreDomain("");
-      qc.invalidateQueries({ queryKey: ["shopify-settings"] });
-      qc.invalidateQueries({ queryKey: ["sync-status"] });
-    },
-    onError: (err: any) => {
-      const detail = err.response?.data?.detail;
-      const msg = typeof detail === "string" ? detail
-        : detail ? JSON.stringify(detail)
-        : err.message ?? "Connection failed";
-      setConnectError(msg);
-    },
-  });
+  const handleConnectShopify = () => {
+    const shop = storeDomain.trim().toLowerCase()
+      .replace(/^https?:\/\//, "")
+      .replace(/\/$/, "");
+    if (!shop) return;
+    if (!shop.endsWith(".myshopify.com")) {
+      setConnectError("Must be your .myshopify.com domain (e.g. mystore.myshopify.com)");
+      return;
+    }
+    setConnectError(null);
+    const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+    window.location.href = `${apiBase}/api/v1/auth/shopify?shop=${encodeURIComponent(shop)}`;
+  };
 
   const disconnectMutation = useMutation({
     mutationFn: () => settingsApi.disconnectShopify(),
@@ -75,6 +74,15 @@ export default function SettingsPage() {
     mutationFn: () => storeSettingsApi.testEmail(),
     onSuccess: () => setTestEmailResult("Test email sent successfully!"),
     onError: () => setTestEmailResult("Failed to send test email. Check your SMTP settings."),
+  });
+
+  const syncInboxMutation = useMutation({
+    mutationFn: () => supplierSrmApi.syncInbox(),
+    onSuccess: (res) => {
+      const d = res.data;
+      setSyncResult(`Sync complete: ${d.new_emails} new email${d.new_emails !== 1 ? "s" : ""} from ${d.matched_suppliers} supplier${d.matched_suppliers !== 1 ? "s" : ""}.`);
+    },
+    onError: (err: any) => setSyncResult(`Sync failed: ${err.response?.data?.detail || err.message}`),
   });
 
   return (
@@ -135,7 +143,7 @@ export default function SettingsPage() {
                     placeholder="your-store.myshopify.com"
                   />
                   <p className="text-xs text-gray-400 mt-1">
-                    Must be your <strong>.myshopify.com</strong> domain — not a custom domain (e.g. <code className="bg-gray-100 px-1 rounded">mystore.myshopify.com</code>). A token is fetched automatically using your app credentials.
+                    Must be your <strong>.myshopify.com</strong> domain — not a custom domain (e.g. <code className="bg-gray-100 px-1 rounded">mystore.myshopify.com</code>). You will be redirected to Shopify to approve the connection.
                   </p>
                 </div>
 
@@ -147,12 +155,10 @@ export default function SettingsPage() {
 
                 <Button
                   size="sm"
-                  onClick={() => connectMutation.mutate(storeDomain.trim())}
-                  disabled={connectMutation.isPending || !storeDomain.trim()}
+                  onClick={handleConnectShopify}
+                  disabled={!storeDomain.trim()}
                 >
-                  {connectMutation.isPending
-                    ? <><Loader2 className="h-4 w-4 mr-1 animate-spin" />Connecting...</>
-                    : <><Wifi className="h-4 w-4 mr-1" />Connect Store</>}
+                  <Wifi className="h-4 w-4 mr-1" />Connect with Shopify
                 </Button>
               </>
             )}
@@ -329,6 +335,97 @@ export default function SettingsPage() {
             {testEmailResult && (
               <p className={`text-sm ${testEmailResult.startsWith("Test email sent") ? "text-green-600" : "text-red-600"}`}>
                 {testEmailResult}
+              </p>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Email Receiving (IMAP) */}
+        <Card>
+          <CardHeader className="pb-4">
+            <CardTitle className="text-base flex items-center gap-2">
+              <Inbox className="h-4 w-4 text-gray-500" />
+              Email Receiving (IMAP)
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <p className="text-xs text-gray-500 bg-gray-50 border rounded p-3">
+              Connect your inbox so replies from suppliers are automatically matched and logged in their communication thread.
+              For Gmail, use an <strong>App Password</strong> (not your regular password).
+              The inbox is polled every 15 minutes automatically — only emails <em>from</em> supplier addresses you have on file will be imported.
+            </p>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <Label>IMAP Host</Label>
+                <Input
+                  className="mt-1"
+                  value={storeForm?.imap_host || ""}
+                  onChange={(e) => setStoreForm((prev: any) => ({ ...prev, imap_host: e.target.value }))}
+                  placeholder="imap.gmail.com"
+                />
+              </div>
+              <div>
+                <Label>IMAP Port</Label>
+                <Input
+                  className="mt-1"
+                  type="number"
+                  value={storeForm?.imap_port || ""}
+                  onChange={(e) => setStoreForm((prev: any) => ({ ...prev, imap_port: e.target.value ? Number(e.target.value) : null }))}
+                  placeholder="993"
+                />
+              </div>
+              <div>
+                <Label>IMAP Username</Label>
+                <Input
+                  className="mt-1"
+                  value={storeForm?.imap_user || ""}
+                  onChange={(e) => setStoreForm((prev: any) => ({ ...prev, imap_user: e.target.value }))}
+                  placeholder="you@gmail.com"
+                />
+              </div>
+              <div>
+                <Label>IMAP Password / App Password</Label>
+                <Input
+                  className="mt-1"
+                  type="password"
+                  value={storeForm?.imap_password || ""}
+                  onChange={(e) => setStoreForm((prev: any) => ({ ...prev, imap_password: e.target.value }))}
+                  placeholder="••••••••"
+                />
+              </div>
+              <div>
+                <Label>Folder</Label>
+                <Input
+                  className="mt-1"
+                  value={storeForm?.imap_folder || ""}
+                  onChange={(e) => setStoreForm((prev: any) => ({ ...prev, imap_folder: e.target.value }))}
+                  placeholder="INBOX"
+                />
+              </div>
+            </div>
+            <div className="flex gap-2 items-center">
+              <Button
+                size="sm"
+                onClick={() => storeUpdateMutation.mutate()}
+                disabled={storeUpdateMutation.isPending || !storeForm}
+              >
+                {storeUpdateMutation.isPending ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : null}
+                Save IMAP Settings
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => { setSyncResult(null); syncInboxMutation.mutate(); }}
+                disabled={syncInboxMutation.isPending}
+              >
+                {syncInboxMutation.isPending
+                  ? <><Loader2 className="h-4 w-4 mr-1 animate-spin" />Syncing...</>
+                  : <><RefreshCw className="h-4 w-4 mr-1" />Sync Now</>}
+              </Button>
+            </div>
+            {syncResult && (
+              <p className={`text-sm ${syncResult.startsWith("Sync complete") ? "text-green-600" : "text-red-600"}`}>
+                {syncResult}
               </p>
             )}
           </CardContent>

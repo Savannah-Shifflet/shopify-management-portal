@@ -16,6 +16,7 @@ import {
   ShoppingCart,
   ClipboardList,
   Search,
+  Layers,
 } from "lucide-react";
 import { clearToken } from "@/lib/auth";
 import { useRouter } from "next/navigation";
@@ -31,6 +32,7 @@ const navItems = [
   { href: "/suppliers", label: "Suppliers", icon: Truck },
   { href: "/reorders", label: "Reorders", icon: ShoppingCart },
   { href: "/sync", label: "Shopify Sync", icon: RefreshCw },
+  { href: "/collections", label: "Collections", icon: Layers },
   { href: "/audit-log", label: "Audit Log", icon: ClipboardList },
   { href: "/settings", label: "Settings", icon: Settings },
 ];

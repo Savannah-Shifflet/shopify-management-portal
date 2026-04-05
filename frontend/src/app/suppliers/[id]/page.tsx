@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useParams } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { suppliersApi, productsApi, supplierSrmApi } from "@/lib/api";
+import { suppliersApi, productsApi, supplierSrmApi, supplierLetterApi } from "@/lib/api";
 import { PageShell } from "@/components/layout/PageShell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -14,6 +14,7 @@ import {
   Save, Play, Loader2, ArrowLeft, CheckCircle, AlertCircle, Sparkles,
   Check, X, PackageCheck, Package, DollarSign, TrendingUp, Truck,
   ShoppingBag, Phone, Mail, User, Plus, Trash2, RefreshCw, ExternalLink,
+  FileText,
 } from "lucide-react";
 import Link from "next/link";
 import { cn, formatPrice, statusColor } from "@/lib/utils";
@@ -310,6 +311,16 @@ export default function SupplierDetailPage() {
     onSuccess: () => refetchReorders(),
   });
 
+  const [showLetterModal, setShowLetterModal] = useState(false);
+  const [letterDraft, setLetterDraft] = useState<{ subject: string; body: string } | null>(null);
+  const letterMutation = useMutation({
+    mutationFn: () => supplierLetterApi.generate(id),
+    onSuccess: (res) => {
+      setLetterDraft(res.data);
+      setShowLetterModal(true);
+    },
+  });
+
   if (!form) {
     return <PageShell title="Loading..."><Loader2 className="animate-spin" /></PageShell>;
   }
@@ -341,6 +352,16 @@ export default function SupplierDetailPage() {
           <Link href={`/suppliers/${id}/emails`}>
             <Button variant="outline" size="sm"><Mail className="h-4 w-4 mr-1" />Email Thread</Button>
           </Link>
+          <Button
+            variant="outline" size="sm"
+            onClick={() => letterMutation.mutate()}
+            disabled={letterMutation.isPending}
+          >
+            {letterMutation.isPending
+              ? <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+              : <FileText className="h-4 w-4 mr-1" />}
+            Generate Letter
+          </Button>
           <Button size="sm" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending || !isDirty}>
             {saveMutation.isPending ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Save className="h-4 w-4 mr-1" />}
             {isDirty ? "Save" : "Saved"}
@@ -776,8 +797,8 @@ export default function SupplierDetailPage() {
                         <div className="flex items-center gap-2">
                           <Input className="h-7 text-xs flex-1" placeholder="Filter by title…" value={filterText} onChange={(e) => setFilterText(e.target.value)} />
                           <button type="button" className="text-xs text-blue-600 hover:underline whitespace-nowrap"
-                            onClick={() => setReviewSelected(new Set(filtered.map((_: any, i: number) => items.indexOf(_))))}>
-                            Select all ({filtered.length})
+                            onClick={() => setReviewSelected(new Set(filtered.filter((it: any) => !it.already_imported).map((_: any) => items.indexOf(_))))}>
+                            Select new ({filtered.filter((it: any) => !it.already_imported).length})
                           </button>
                           <button type="button" className="text-xs text-gray-500 hover:underline whitespace-nowrap"
                             onClick={() => setReviewSelected(new Set())}>None</button>
@@ -795,23 +816,34 @@ export default function SupplierDetailPage() {
                                   <th className="text-left px-3 py-2 font-medium text-gray-700">Title</th>
                                   <th className="text-left px-3 py-2 font-medium text-gray-700 w-28">Price</th>
                                   <th className="text-left px-3 py-2 font-medium text-gray-700 w-24">SKU</th>
+                                  <th className="w-28"></th>
                                 </tr>
                               </thead>
                               <tbody>
                                 {filtered.map((item: any) => {
                                   const realIdx = items.indexOf(item);
                                   const checked = reviewSelected.has(realIdx);
+                                  const alreadyImported = !!item.already_imported;
                                   return (
-                                    <tr key={realIdx} className={`border-t border-amber-50 cursor-pointer ${checked ? "bg-blue-50" : "hover:bg-gray-50"}`}
-                                      onClick={() => setReviewSelected((prev) => {
-                                        const next = new Set(prev);
-                                        checked ? next.delete(realIdx) : next.add(realIdx);
-                                        return next;
-                                      })}>
-                                      <td className="px-2 py-1.5 text-center"><input type="checkbox" readOnly checked={checked} className="pointer-events-none" /></td>
+                                    <tr key={realIdx}
+                                      className={`border-t border-amber-50 ${alreadyImported ? "opacity-50" : "cursor-pointer"} ${checked ? "bg-blue-50" : alreadyImported ? "bg-gray-50" : "hover:bg-gray-50"}`}
+                                      onClick={() => {
+                                        if (alreadyImported) return;
+                                        setReviewSelected((prev) => {
+                                          const next = new Set(prev);
+                                          checked ? next.delete(realIdx) : next.add(realIdx);
+                                          return next;
+                                        });
+                                      }}>
+                                      <td className="px-2 py-1.5 text-center"><input type="checkbox" readOnly checked={checked} disabled={alreadyImported} className="pointer-events-none" /></td>
                                       <td className="px-3 py-1.5 text-gray-800 font-medium max-w-xs truncate">{item.title}</td>
                                       <td className="px-3 py-1.5 text-green-700">{item.price || <span className="text-gray-300 italic">—</span>}</td>
                                       <td className="px-3 py-1.5 text-gray-500">{item.sku || <span className="text-gray-300 italic">—</span>}</td>
+                                      <td className="px-3 py-1.5">
+                                        {alreadyImported && (
+                                          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500 whitespace-nowrap">Already imported</span>
+                                        )}
+                                      </td>
                                     </tr>
                                   );
                                 })}
@@ -1488,6 +1520,55 @@ export default function SupplierDetailPage() {
             </Card>
           )}
         </div>
+      )}
+      {/* Generate Letter Modal */}
+      {showLetterModal && letterDraft && (
+        <>
+          <div className="fixed inset-0 bg-black/40 z-50" onClick={() => setShowLetterModal(false)} />
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-center justify-between px-6 py-4 border-b">
+                <div className="flex items-center gap-2">
+                  <FileText className="h-5 w-5 text-blue-500" />
+                  <h2 className="font-semibold">AI-Generated Reseller Letter</h2>
+                </div>
+                <button onClick={() => setShowLetterModal(false)} className="text-gray-400 hover:text-gray-600">
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+              <div className="px-6 py-4 space-y-3">
+                <div>
+                  <label className="text-xs font-medium text-gray-600 mb-1 block">Subject</label>
+                  <input
+                    className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    value={letterDraft.subject}
+                    onChange={(e) => setLetterDraft({ ...letterDraft, subject: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-gray-600 mb-1 block">Body (editable before sending)</label>
+                  <textarea
+                    rows={12}
+                    className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    value={letterDraft.body}
+                    onChange={(e) => setLetterDraft({ ...letterDraft, body: e.target.value })}
+                  />
+                </div>
+              </div>
+              <div className="px-6 py-4 border-t bg-gray-50 flex gap-2">
+                <Button
+                  onClick={() => {
+                    setShowLetterModal(false);
+                    window.location.href = `/suppliers/${id}/emails?subject=${encodeURIComponent(letterDraft.subject)}&body=${encodeURIComponent(letterDraft.body)}`;
+                  }}
+                >
+                  <Mail className="h-4 w-4 mr-1" />Use in Email Composer
+                </Button>
+                <Button variant="outline" onClick={() => setShowLetterModal(false)}>Close</Button>
+              </div>
+            </div>
+          </div>
+        </>
       )}
     </PageShell>
   );

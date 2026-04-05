@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { productsApi, enrichmentApi, syncApi, suppliersApi, templatesApi } from "@/lib/api";
 import { PageShell } from "@/components/layout/PageShell";
@@ -25,11 +25,14 @@ import type { Product } from "@/types/product";
 export default function ProductDetailPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const backHref = searchParams.get("back") ?? "/products";
   const qc = useQueryClient();
   const [showEnrichment, setShowEnrichment] = useState(false);
   const [form, setForm] = useState<Partial<Product>>({});
   const [isDirty, setIsDirty] = useState(false);
   const [isEnriching, setIsEnriching] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
   const [descTab, setDescTab] = useState<"edit" | "preview">("edit");
   const [tagInput, setTagInput] = useState("");
 
@@ -41,8 +44,8 @@ export default function ProductDetailPage() {
   const { data: product, isLoading } = useQuery({
     queryKey: ["product", id],
     queryFn: () => productsApi.get(id).then((r) => r.data),
-    // Poll every 2s while Celery enrichment task is running
-    refetchInterval: isEnriching ? 2000 : false,
+    // Poll every 2s while a Celery task is running
+    refetchInterval: isEnriching || isSyncing ? 2000 : false,
   });
 
   // Initialize form on first load; don't overwrite while user is editing
@@ -57,6 +60,14 @@ export default function ProductDetailPage() {
       setShowEnrichment(true);
     }
   }, [product?.enrichment_status, isEnriching]);
+
+  // Stop polling once sync leaves pending
+  useEffect(() => {
+    if (isSyncing && product?.sync_status !== "pending") {
+      setIsSyncing(false);
+      qc.invalidateQueries({ queryKey: ["products"] });
+    }
+  }, [product?.sync_status, isSyncing]);
 
   const saveMutation = useMutation({
     mutationFn: (data: Partial<Product>) => productsApi.update(id, data),
@@ -77,23 +88,28 @@ export default function ProductDetailPage() {
 
   const syncMutation = useMutation({
     mutationFn: () => syncApi.syncProduct(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["product", id] }),
+    onSuccess: () => setIsSyncing(true),
   });
 
   const approveMutation = useMutation({
-    mutationFn: () => productsApi.update(id, { status: "approved" }),
+    mutationFn: () => productsApi.update(id, { status: "active" }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["product", id] }),
   });
 
-  const [rescrapeDone, setRescrapesDone] = useState(false);
+  const [rescrapeDone, setRescrapeDone] = useState(false);
+  const [scrapeError, setScrapeError] = useState<string | null>(null);
   const rescrapeMutation = useMutation({
     mutationFn: () => productsApi.rescrape(id),
     onSuccess: () => {
-      setRescrapesDone(true);
+      setScrapeError(null);
+      setRescrapeDone(true);
       setTimeout(() => {
-        setRescrapesDone(false);
+        setRescrapeDone(false);
         qc.invalidateQueries({ queryKey: ["product", id] });
       }, 3000);
+    },
+    onError: (err: any) => {
+      setScrapeError(err.response?.data?.detail || err.message || "Re-scrape failed");
     },
   });
 
@@ -205,20 +221,25 @@ export default function ProductDetailPage() {
       }
       actions={
         <div className="flex items-center gap-2">
-          <Link href="/products">
+          <Link href={backHref}>
             <Button variant="ghost" size="sm"><ArrowLeft className="h-4 w-4 mr-1" />Back</Button>
           </Link>
           {p.source_url && (
-            <Button
-              variant="outline" size="sm"
-              onClick={() => rescrapeMutation.mutate()}
-              disabled={rescrapeMutation.isPending || rescrapeDone}
-            >
-              {rescrapeMutation.isPending
-                ? <Loader2 className="h-4 w-4 mr-1 animate-spin" />
-                : <RefreshCw className="h-4 w-4 mr-1" />}
-              {rescrapeDone ? "Queued" : "Re-scrape"}
-            </Button>
+            <>
+              <Button
+                variant="outline" size="sm"
+                onClick={() => rescrapeMutation.mutate()}
+                disabled={rescrapeMutation.isPending || rescrapeDone}
+              >
+                {rescrapeMutation.isPending
+                  ? <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                  : <RefreshCw className="h-4 w-4 mr-1" />}
+                {rescrapeDone ? "Queued" : "Re-scrape"}
+              </Button>
+              {scrapeError && (
+                <span className="text-xs text-red-600">{scrapeError}</span>
+              )}
+            </>
           )}
           <Button
             variant="outline" size="sm"
@@ -230,7 +251,7 @@ export default function ProductDetailPage() {
               : <Sparkles className="h-4 w-4 mr-1" />}
             {isEnriching ? "Enriching..." : "AI Enrich"}
           </Button>
-          {p.status !== "approved" && p.status !== "synced" && (
+          {p.status !== "active" && p.status !== "archived" && (
             <Button
               variant="outline" size="sm"
               onClick={() => approveMutation.mutate()}
@@ -647,7 +668,12 @@ export default function ProductDetailPage() {
           </Card>
 
           {/* Variants */}
-          <VariantEditor productId={id} variants={p.variants} options={p.options} />
+          <VariantEditor
+            key={p.variants.map((v) => `${v.id}:${v.price}`).join(",")}
+            productId={id}
+            variants={p.variants}
+            options={p.options}
+          />
         </div>
 
         {/* Sidebar — 1/3 width */}
@@ -666,8 +692,7 @@ export default function ProductDetailPage() {
                   onChange={(e) => setField("status", e.target.value)}
                 >
                   <option value="draft">Draft</option>
-                  <option value="enriched">Enriched</option>
-                  <option value="approved">Approved</option>
+                  <option value="active">Active</option>
                   <option value="archived">Archived</option>
                 </Select>
               </div>

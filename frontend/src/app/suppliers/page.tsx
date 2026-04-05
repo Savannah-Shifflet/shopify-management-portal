@@ -1,13 +1,14 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { suppliersApi, supplierSrmApi } from "@/lib/api";
+import { suppliersApi, supplierSrmApi, supplierImportApi } from "@/lib/api";
 import { PageShell } from "@/components/layout/PageShell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
-import { Plus, Truck, Globe, Package, Play, Loader2, X, Search, Mail, Calendar } from "lucide-react";
+import { BulkEmailDialog } from "@/components/suppliers/BulkEmailDialog";
+import { Plus, Truck, Globe, Loader2, X, Search, Mail, Calendar, Upload, CheckCircle } from "lucide-react";
 import Link from "next/link";
 import { cn } from "@/lib/utils";
 
@@ -27,10 +28,14 @@ const EMPTY_FORM = { name: "", company_email: "", contact_name: "", phone: "", w
 
 export default function SuppliersPage() {
   const qc = useQueryClient();
+  const fileRef = useRef<HTMLInputElement>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [form, setForm] = useState(EMPTY_FORM);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [importResult, setImportResult] = useState<{ added: number; skipped: number; errors: number } | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [showBulkEmail, setShowBulkEmail] = useState(false);
 
   const { data: suppliers = [], isLoading } = useQuery({
     queryKey: ["suppliers"],
@@ -56,6 +61,18 @@ export default function SuppliersPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["suppliers"] }),
   });
 
+  const importMutation = useMutation({
+    mutationFn: (file: File) => {
+      const fd = new FormData();
+      fd.append("file", file);
+      return supplierImportApi.importCsv(fd);
+    },
+    onSuccess: (res) => {
+      setImportResult(res.data);
+      qc.invalidateQueries({ queryKey: ["suppliers"] });
+    },
+  });
+
   const filtered = (suppliers as any[]).filter((s: any) => {
     const matchSearch = !search || s.name.toLowerCase().includes(search.toLowerCase()) ||
       (s.company_email ?? "").toLowerCase().includes(search.toLowerCase());
@@ -67,16 +84,68 @@ export default function SuppliersPage() {
   const counts: Record<string, number> = {};
   for (const s of suppliers as any[]) counts[s.status] = (counts[s.status] || 0) + 1;
 
+  const toggleSelect = (id: string) => setSelected((prev) => {
+    const next = new Set(prev);
+    next.has(id) ? next.delete(id) : next.add(id);
+    return next;
+  });
+
+  const toggleAll = () => {
+    if (selected.size === filtered.length) {
+      setSelected(new Set());
+    } else {
+      setSelected(new Set(filtered.map((s: any) => s.id)));
+    }
+  };
+
+  const selectedSuppliers = (filtered as any[]).filter((s: any) => selected.has(s.id));
+
   return (
     <PageShell
       title="Suppliers"
       description="Manage supplier relationships and outreach pipeline"
       actions={
-        <Button size="sm" onClick={() => setShowAdd(true)}>
-          <Plus className="h-4 w-4 mr-1" /> Add Supplier
-        </Button>
+        <div className="flex gap-2">
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".csv"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) { setImportResult(null); importMutation.mutate(file); }
+              e.target.value = "";
+            }}
+          />
+          <Button size="sm" variant="outline" onClick={() => fileRef.current?.click()} disabled={importMutation.isPending}>
+            {importMutation.isPending ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Upload className="h-4 w-4 mr-1" />}
+            Import CSV
+          </Button>
+          {selected.size > 0 && (
+            <Button size="sm" variant="outline" onClick={() => setShowBulkEmail(true)}>
+              <Mail className="h-4 w-4 mr-1" /> Email {selected.size} Selected
+            </Button>
+          )}
+          <Button size="sm" onClick={() => setShowAdd(true)}>
+            <Plus className="h-4 w-4 mr-1" /> Add Supplier
+          </Button>
+        </div>
       }
     >
+      {/* CSV import result */}
+      {importResult && (
+        <div className="flex items-start gap-3 mb-4 p-3 bg-green-50 border border-green-200 rounded-lg text-sm">
+          <CheckCircle className="h-4 w-4 text-green-600 mt-0.5 flex-shrink-0" />
+          <div className="flex-1">
+            <p className="font-medium text-green-800">Import complete</p>
+            <p className="text-green-700 mt-0.5">
+              {importResult.added} added · {importResult.skipped} skipped (duplicate email) · {importResult.errors} errors
+            </p>
+          </div>
+          <button onClick={() => setImportResult(null)} className="text-green-500 hover:text-green-700"><X className="h-4 w-4" /></button>
+        </div>
+      )}
+
       {/* Pipeline status bar */}
       <div className="flex gap-2 mb-5 overflow-x-auto pb-1">
         <button
@@ -142,6 +211,9 @@ export default function SuppliersPage() {
               <label className="text-xs font-medium text-gray-600 mb-1 block">Notes</label>
               <Input value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="Internal notes..." />
             </div>
+            <p className="text-xs text-gray-400">
+              Or <button className="text-blue-600 hover:underline" onClick={() => { setShowAdd(false); fileRef.current?.click(); }}>import from CSV</button> — columns: Company Name, Email, Contact Name, Phone, Website, Product Categories, Notes
+            </p>
             <div className="flex gap-2">
               <Button onClick={() => createMutation.mutate()} disabled={!form.name || !form.company_email || createMutation.isPending}>
                 {createMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : <Plus className="h-4 w-4 mr-1" />}
@@ -161,7 +233,10 @@ export default function SuppliersPage() {
           <CardContent className="p-12 text-center">
             <Truck className="h-10 w-10 mx-auto text-gray-300 mb-3" />
             <p className="text-gray-500 font-medium">No suppliers found</p>
-            <Button size="sm" className="mt-4" onClick={() => setShowAdd(true)}><Plus className="h-4 w-4 mr-1" />Add First Supplier</Button>
+            <div className="flex gap-2 justify-center mt-4">
+              <Button size="sm" onClick={() => setShowAdd(true)}><Plus className="h-4 w-4 mr-1" />Add Supplier</Button>
+              <Button size="sm" variant="outline" onClick={() => fileRef.current?.click()}><Upload className="h-4 w-4 mr-1" />Import CSV</Button>
+            </div>
           </CardContent>
         </Card>
       ) : (
@@ -170,6 +245,14 @@ export default function SuppliersPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b bg-gray-50">
+                  <th className="w-10 px-4 py-3">
+                    <input
+                      type="checkbox"
+                      checked={filtered.length > 0 && selected.size === filtered.length}
+                      onChange={toggleAll}
+                      className="rounded"
+                    />
+                  </th>
                   <th className="text-left px-4 py-3 font-medium text-gray-600">Company</th>
                   <th className="text-left px-4 py-3 font-medium text-gray-600">Contact</th>
                   <th className="text-left px-4 py-3 font-medium text-gray-600">Status</th>
@@ -182,7 +265,15 @@ export default function SuppliersPage() {
                 {filtered.map((s: any) => {
                   const isOverdue = s.follow_up_date && new Date(s.follow_up_date) < new Date();
                   return (
-                    <tr key={s.id} className="border-b last:border-0 hover:bg-gray-50">
+                    <tr key={s.id} className={cn("border-b last:border-0 hover:bg-gray-50", selected.has(s.id) && "bg-blue-50")}>
+                      <td className="px-4 py-3" onClick={(e) => { e.stopPropagation(); toggleSelect(s.id); }}>
+                        <input
+                          type="checkbox"
+                          checked={selected.has(s.id)}
+                          onChange={() => toggleSelect(s.id)}
+                          className="rounded"
+                        />
+                      </td>
                       <td className="px-4 py-3">
                         <div>
                           <Link href={`/suppliers/${s.id}`} className="font-medium hover:text-blue-600">{s.name}</Link>
@@ -228,6 +319,13 @@ export default function SuppliersPage() {
             </table>
           </CardContent>
         </Card>
+      )}
+
+      {showBulkEmail && (
+        <BulkEmailDialog
+          suppliers={selectedSuppliers}
+          onClose={() => { setShowBulkEmail(false); setSelected(new Set()); }}
+        />
       )}
     </PageShell>
   );

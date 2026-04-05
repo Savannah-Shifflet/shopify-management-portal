@@ -322,6 +322,51 @@ def scrape_supplier_catalog(self, supplier_id: Optional[str], url: Optional[str]
         db.close()
 
 
+def _apply_scraped_price(product, price_str: Optional[str], db) -> None:
+    """Parse a scraped price string and apply it directly to the product.
+
+    Always updates supplier_price — this is called from a manual re-scrape so the
+    user explicitly requested a price refresh. Unlike the scheduled price checker
+    (_detect_price_change), we never block on a pending alert here.
+    """
+    if not price_str:
+        return
+    try:
+        cleaned = price_str.replace("$", "").replace(",", "").strip().split()[0]
+        new_price = Decimal(cleaned)
+    except Exception:
+        return
+
+    if product.supplier_price == new_price:
+        return  # no change
+
+    product.supplier_price = new_price
+    product.supplier_price_at = datetime.utcnow()
+
+    if product.use_supplier_price:
+        product.base_price = new_price
+        # Apply pricing rules for variant prices if a supplier is linked
+        if product.supplier_id:
+            try:
+                from app.services.pricing_service import calculate_retail_price
+                result = calculate_retail_price(
+                    new_price, product.supplier_id,
+                    product.product_type, product.tags or [], db,
+                )
+                for variant in product.variants:
+                    variant.price = result["price"]
+            except Exception:
+                for variant in product.variants:
+                    variant.price = new_price
+        else:
+            for variant in product.variants:
+                variant.price = new_price
+
+    # Mark out-of-sync so the new price is pushed to Shopify on next sync
+    if product.sync_status == "synced":
+        product.sync_status = "out_of_sync"
+
+
 @celery_app.task(name="app.workers.scrape_tasks.scrape_product_details", bind=True, max_retries=2)
 def scrape_product_details(self, product_id: str):
     """Scrape description and images from a product's source_url after approval."""
@@ -338,6 +383,7 @@ def scrape_product_details(self, product_id: str):
 
         description = None
         image_urls = []
+        scraped_price: Optional[str] = None
 
         # ── Shopify product JSON fast path ──────────────────────────────
         # For Shopify stores: /products/{handle}.json returns description + images instantly
@@ -353,11 +399,14 @@ def scrape_product_details(self, product_id: str):
                         p_data = resp.json().get("product", {})
                         description = p_data.get("body_html") or None
                         image_urls = [img["src"] for img in p_data.get("images", []) if img.get("src")][:10]
-                        logger.info(f"Shopify product JSON used for {product.source_url}: desc={bool(description)}, images={len(image_urls)}")
+                        variants = p_data.get("variants", [])
+                        if variants and variants[0].get("price"):
+                            scraped_price = str(variants[0]["price"])
+                        logger.info(f"Shopify product JSON used for {product.source_url}: desc={bool(description)}, images={len(image_urls)}, price={scraped_price}")
                 except Exception as e:
                     logger.debug(f"Shopify product JSON fast path failed: {e}")
 
-        if description or image_urls:
+        if description or image_urls or scraped_price:
             # Got everything from JSON — skip Playwright
             if description and not product.body_html:
                 product.body_html = description
@@ -366,8 +415,17 @@ def scrape_product_details(self, product_id: str):
             for i, url in enumerate(image_urls):
                 if url not in existing_srcs:
                     db.add(ProductImage(product_id=product.id, src=url, alt=product.title, position=len(existing_srcs) + i + 1))
+            _apply_scraped_price(product, scraped_price, db)
             db.commit()
-            return {"description_found": bool(description), "images_found": len(image_urls), "source": "shopify_json"}
+            return {"description_found": bool(description), "images_found": len(image_urls), "price_found": bool(scraped_price), "source": "shopify_json"}
+
+        # Get supplier price selector for Playwright scrape
+        price_selector = ".price, [data-price], .product-price"
+        if product.supplier_id:
+            from app.models.supplier import Supplier
+            supplier = db.query(Supplier).filter(Supplier.id == product.supplier_id).first()
+            if supplier and supplier.scrape_config and supplier.scrape_config.get("price_selector"):
+                price_selector = supplier.scrape_config["price_selector"]
 
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
@@ -396,6 +454,11 @@ def scrape_product_details(self, product_id: str):
                     if len(text) > 20:
                         description = el.inner_html().strip()
                         break
+
+            # Extract price
+            price_el = page.query_selector(price_selector)
+            if price_el:
+                scraped_price = price_el.inner_text().strip()
 
             # Extract images — try common product image selectors, stop at first hit
             img_selectors = [
@@ -438,8 +501,9 @@ def scrape_product_details(self, product_id: str):
                     position=len(existing_srcs) + i + 1,
                 ))
 
+        _apply_scraped_price(product, scraped_price, db)
         db.commit()
-        return {"description_found": bool(description), "images_found": len(image_urls)}
+        return {"description_found": bool(description), "images_found": len(image_urls), "price_found": bool(scraped_price)}
 
     except Exception as exc:
         db.rollback()
@@ -504,7 +568,6 @@ def create_products_from_session(session_id: str, indices: list, db) -> int:
                     source_type="scrape",
                     status="draft",
                     sync_status="never_synced",
-                    enrichment_status="pending",
                 )
                 if prod_data.get("price"):
                     price_str = prod_data["price"].replace("$", "").replace(",", "").strip()

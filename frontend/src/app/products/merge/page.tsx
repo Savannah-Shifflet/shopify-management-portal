@@ -138,6 +138,7 @@ export default function MergePage() {
     onSuccess: (res) => {
       qc.invalidateQueries({ queryKey: ["products"] });
       qc.invalidateQueries({ queryKey: ["products", "duplicate-skus"] });
+      qc.removeQueries({ queryKey: ["product", res.data.primary_id] });
       router.push(`/products/${res.data.primary_id}`);
     },
   });
@@ -164,7 +165,7 @@ export default function MergePage() {
     if (mergeState!.imagesStrategy === "union") {
       initial = allImageSrcs;
     } else if (mergeState!.imagesStrategy.startsWith("product:")) {
-      const pid = mergeState!.imagesStrategy.split(":", 1)[1];
+      const pid = mergeState!.imagesStrategy.split(":")[1];
       initial = (products.find((p) => p.id === pid)?.images ?? []).map((i) => i.src);
     } else {
       initial = allImageSrcs;

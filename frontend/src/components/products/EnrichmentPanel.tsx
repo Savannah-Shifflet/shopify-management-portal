@@ -2,7 +2,8 @@
 
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
-import { X, Check, Sparkles, ChevronDown, ChevronUp } from "lucide-react";
+import { X, Check, Sparkles, ChevronDown, ChevronUp, Eye, Pencil } from "lucide-react";
+import { cn } from "@/lib/utils";
 import type { Product } from "@/types/product";
 
 interface EnrichmentPanelProps {
@@ -16,6 +17,7 @@ interface FieldSuggestion {
   label: string;
   current: string | null;
   suggested: string | null;
+  isHtml: boolean;
 }
 
 export function EnrichmentPanel({ product, onClose, onAccept }: EnrichmentPanelProps) {
@@ -25,19 +27,27 @@ export function EnrichmentPanel({ product, onClose, onAccept }: EnrichmentPanelP
       label: "Description",
       current: product.body_html || null,
       suggested: product.ai_description || null,
+      isHtml: true,
     },
     {
       key: "tags",
       label: "Tags",
       current: (product.tags || []).join(", ") || null,
       suggested: (product.ai_tags || []).join(", ") || null,
+      isHtml: false,
     },
-    // SEO fields are auto-applied directly by the enrichment task (no separate ai_seo_* columns).
-    // They appear pre-filled in the product form's SEO section — no review step needed here.
   ].filter((s) => s.suggested);
 
   const [accepted, setAccepted] = useState<Set<keyof Product>>(new Set());
   const [expanded, setExpanded] = useState<Set<string>>(new Set(["body_html"]));
+  const [editMode, setEditMode] = useState<Set<string>>(new Set());
+  const [editedContent, setEditedContent] = useState<Record<string, string>>({});
+
+  const getContent = (key: string, original: string | null): string =>
+    editedContent[key] !== undefined ? editedContent[key] : original ?? "";
+
+  const isEdited = (key: string, original: string | null) =>
+    editedContent[key] !== undefined && editedContent[key] !== (original ?? "");
 
   const toggleAccept = (key: keyof Product) => {
     setAccepted((prev) => {
@@ -47,17 +57,18 @@ export function EnrichmentPanel({ product, onClose, onAccept }: EnrichmentPanelP
     });
   };
 
-  const acceptAll = () => {
-    setAccepted(new Set(suggestions.map((s) => s.key)));
-  };
+  const acceptAll = () => setAccepted(new Set(suggestions.map((s) => s.key)));
 
   const handleApply = () => {
-    const fields: Partial<Product> = {};
-    if (accepted.has("body_html") && product.ai_description) {
-      fields.body_html = product.ai_description;
+    const fields: Partial<Product> = {
+      ai_description: null,  // always clear the suggestion on accept
+    };
+    if (accepted.has("body_html")) {
+      fields.body_html = getContent("body_html", product.ai_description);
     }
-    if (accepted.has("tags") && product.ai_tags) {
-      fields.tags = product.ai_tags;
+    if (accepted.has("tags")) {
+      const raw = getContent("tags", (product.ai_tags || []).join(", "));
+      fields.tags = raw.split(",").map((t) => t.trim()).filter(Boolean) as any;
     }
     onAccept(fields);
   };
@@ -75,7 +86,7 @@ export function EnrichmentPanel({ product, onClose, onAccept }: EnrichmentPanelP
             <Sparkles className="h-5 w-5 text-blue-500" />
             <div>
               <h2 className="font-semibold">AI Enrichment Suggestions</h2>
-              <p className="text-xs text-gray-500">Review and accept AI-generated content</p>
+              <p className="text-xs text-gray-500">Review, edit, and accept AI-generated content</p>
             </div>
           </div>
           <Button variant="ghost" size="icon" onClick={onClose}>
@@ -96,15 +107,20 @@ export function EnrichmentPanel({ product, onClose, onAccept }: EnrichmentPanelP
         {/* Suggestions */}
         <div className="flex-1 overflow-y-auto p-6 space-y-4">
           {suggestions.map((s) => {
-            const isExpanded = expanded.has(s.key as string);
+            const key = s.key as string;
+            const isExpandedField = expanded.has(key);
             const isAccepted = accepted.has(s.key);
+            const isEditingField = editMode.has(key);
+            const currentContent = getContent(key, s.suggested);
+            const edited = isEdited(key, s.suggested);
 
             return (
               <div
-                key={s.key as string}
-                className={`border rounded-lg overflow-hidden transition-colors ${
+                key={key}
+                className={cn(
+                  "border rounded-lg overflow-hidden transition-colors",
                   isAccepted ? "border-green-300 bg-green-50" : "border-gray-200"
-                }`}
+                )}
               >
                 {/* Field header */}
                 <div className="flex items-center gap-3 px-4 py-3">
@@ -113,16 +129,19 @@ export function EnrichmentPanel({ product, onClose, onAccept }: EnrichmentPanelP
                     onClick={() =>
                       setExpanded((prev) => {
                         const next = new Set(prev);
-                        next.has(s.key as string) ? next.delete(s.key as string) : next.add(s.key as string);
+                        next.has(key) ? next.delete(key) : next.add(key);
                         return next;
                       })
                     }
                   >
                     <span className="font-medium text-sm">{s.label}</span>
-                    {isExpanded ? (
-                      <ChevronUp className="h-4 w-4 text-gray-400" />
+                    {edited && (
+                      <span className="text-xs bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded font-medium">Edited</span>
+                    )}
+                    {isExpandedField ? (
+                      <ChevronUp className="h-4 w-4 text-gray-400 ml-auto" />
                     ) : (
-                      <ChevronDown className="h-4 w-4 text-gray-400" />
+                      <ChevronDown className="h-4 w-4 text-gray-400 ml-auto" />
                     )}
                   </button>
                   <Button
@@ -140,24 +159,85 @@ export function EnrichmentPanel({ product, onClose, onAccept }: EnrichmentPanelP
                 </div>
 
                 {/* Diff content */}
-                {isExpanded && (
+                {isExpandedField && (
                   <div className="border-t grid grid-cols-2 gap-0">
-                    <div className="p-4 border-r">
+                    {/* Current */}
+                    <div className="p-4 border-r overflow-y-auto max-h-96">
                       <p className="text-xs font-medium text-gray-400 uppercase mb-2">Current</p>
                       {s.current ? (
-                        <p className="text-sm text-gray-700 whitespace-pre-wrap line-clamp-6"
-                           dangerouslySetInnerHTML={{ __html: s.current }} />
+                        s.isHtml ? (
+                          <div
+                            className="text-sm text-gray-700 prose prose-sm max-w-none"
+                            dangerouslySetInnerHTML={{ __html: s.current }}
+                          />
+                        ) : (
+                          <p className="text-sm text-gray-700">{s.current}</p>
+                        )
                       ) : (
                         <p className="text-sm text-gray-400 italic">Empty</p>
                       )}
                     </div>
-                    <div className="p-4 bg-blue-50/50">
-                      <p className="text-xs font-medium text-blue-500 uppercase mb-2">AI Suggestion</p>
-                      {s.suggested ? (
-                        <p className="text-sm text-gray-700 whitespace-pre-wrap line-clamp-6"
-                           dangerouslySetInnerHTML={{ __html: s.suggested }} />
+
+                    {/* AI Suggestion (editable) */}
+                    <div className="p-4 bg-blue-50/50 overflow-y-auto max-h-96">
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <p className="text-xs font-medium text-blue-500 uppercase">AI Suggestion</p>
+                          {edited && (
+                            <span className="text-xs bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded font-medium">Edited</span>
+                          )}
+                        </div>
+                        {s.isHtml && (
+                          <button
+                            onClick={() =>
+                              setEditMode((prev) => {
+                                const next = new Set(prev);
+                                next.has(key) ? next.delete(key) : next.add(key);
+                                // Seed on first edit
+                                if (!next.has(key)) return next;
+                                if (editedContent[key] === undefined) {
+                                  setEditedContent((p) => ({ ...p, [key]: s.suggested ?? "" }));
+                                }
+                                return next;
+                              })
+                            }
+                            className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-700"
+                          >
+                            {isEditingField
+                              ? <><Eye className="h-3 w-3" />Preview</>
+                              : <><Pencil className="h-3 w-3" />Edit HTML</>}
+                          </button>
+                        )}
+                      </div>
+
+                      {isEditingField ? (
+                        <>
+                          <textarea
+                            className="w-full text-xs font-mono bg-gray-900 text-green-300 rounded p-2 min-h-[200px] resize-y border-0 outline-none focus:ring-1 focus:ring-blue-400"
+                            value={currentContent}
+                            onChange={(e) =>
+                              setEditedContent((prev) => ({ ...prev, [key]: e.target.value }))
+                            }
+                            spellCheck={false}
+                          />
+                          {edited && (
+                            <button
+                              className="mt-1.5 text-xs text-gray-400 hover:text-gray-600 underline"
+                              onClick={() =>
+                                setEditedContent((prev) => ({ ...prev, [key]: s.suggested ?? "" }))
+                              }
+                            >
+                              Reset to original
+                            </button>
+                          )}
+                        </>
+                      ) : s.isHtml ? (
+                        <div
+                          className="text-sm text-gray-700 prose prose-sm max-w-none"
+                          dangerouslySetInnerHTML={{ __html: currentContent }}
+                        />
                       ) : (
-                        <p className="text-sm text-gray-400 italic">No suggestion</p>
+                        <p className="text-sm text-gray-700">{currentContent}</p>
                       )}
                     </div>
                   </div>

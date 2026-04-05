@@ -8,6 +8,8 @@ from app.database import get_db
 from app.dependencies import get_current_user
 from app.models.product import Product
 from app.models.user import User
+from app.workers.enrichment_tasks import enrich_product as enrich_task
+from app.workers.enrichment_tasks import enrich_products_batch as enrich_batch_task
 
 router = APIRouter(prefix="/api/v1/enrichment", tags=["enrichment"])
 
@@ -39,15 +41,15 @@ def enrich_product(
         raise HTTPException(status_code=404, detail="Product not found")
 
     product.enrichment_status = "pending"
-    db.commit()
-
     fields = None
     template_id = None
     if options:
         fields = [f for f in (options.fields or []) if f in VALID_FIELDS] or None
         template_id = options.template_id
+    if template_id:
+        product.applied_template_id = UUID(template_id)
+    db.commit()
 
-    from app.workers.enrichment_tasks import enrich_product as enrich_task
     task = enrich_task.delay(str(product_id), fields=fields, template_id=template_id)
     return {"task_id": task.id, "status": "queued"}
 
@@ -58,22 +60,39 @@ def bulk_enrich(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    from app.workers.enrichment_tasks import enrich_product as enrich_task
-
     fields = [f for f in (payload.fields or []) if f in VALID_FIELDS] or None
     template_id = payload.template_id
 
-    task_ids = []
+    # Validate ownership and mark all products pending before queuing
+    valid_ids: list[str] = []
     for pid in payload.product_ids:
         product = db.query(Product).filter(
             Product.id == pid, Product.user_id == current_user.id
         ).first()
         if product:
             product.enrichment_status = "pending"
-            task = enrich_task.delay(str(pid), fields=fields, template_id=template_id)
-            task_ids.append(task.id)
+            if template_id:
+                product.applied_template_id = UUID(template_id)
+            valid_ids.append(str(pid))
     db.commit()
-    return {"queued": len(task_ids), "task_ids": task_ids}
+
+    if not valid_ids:
+        return {"queued": 0, "task_ids": []}
+
+    # Dispatch a single batch task that processes all products concurrently
+    # via asyncio.gather() + semaphore — dramatically faster than N individual tasks.
+    # For very large batches (>500) dispatch two tasks to parallelize across workers.
+    task_ids = []
+    if len(valid_ids) > 500:
+        mid = len(valid_ids) // 2
+        for chunk in [valid_ids[:mid], valid_ids[mid:]]:
+            t = enrich_batch_task.delay(product_ids=chunk, fields=fields, template_id=template_id)
+            task_ids.append(t.id)
+    else:
+        t = enrich_batch_task.delay(product_ids=valid_ids, fields=fields, template_id=template_id)
+        task_ids.append(t.id)
+
+    return {"queued": len(valid_ids), "task_ids": task_ids}
 
 
 @router.get("/status/{task_id}")

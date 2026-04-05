@@ -135,11 +135,28 @@ def _detect_price_change(product, new_price: Decimal, supplier_id, db) -> bool:
         product.supplier_price_at = datetime.utcnow()
         if product.use_supplier_price:
             product.base_price = new_price
-        from app.services.pricing_service import calculate_retail_price
-        result = calculate_retail_price(new_price, supplier_id, product.product_type, product.tags or [], db)
+        from app.services.pricing_service import calculate_retail_price, record_price_history
+        from app.models.store_settings import StoreSettings
+        store = db.query(StoreSettings).filter(StoreSettings.user_id == product.user_id).first()
+        default_markup_pct = Decimal(str(store.default_markup_pct)) if store and store.default_markup_pct else None
+        shipping = product.shipping_cost or (Decimal(str(store.default_shipping_cost)) if store and store.default_shipping_cost else None)
+        result = calculate_retail_price(
+            new_price, supplier_id, product.product_type, product.tags or [], db,
+            shipping_cost=shipping, default_markup_pct=default_markup_pct,
+        )
         for variant in product.variants:
+            old_variant_price = variant.price
             variant.price = result["price"]
+            record_price_history(
+                db, product.id, old_variant_price, result["price"],
+                source="scrape", price_type="retail", supplier_id=supplier_id,
+                variant_id=variant.id,
+            )
 
+        record_price_history(
+            db, product.id, old_price, new_price,
+            source="scrape", price_type="supplier", supplier_id=supplier_id,
+        )
         alert = PricingAlert(
             user_id=product.user_id,
             product_id=product.id,
@@ -209,17 +226,19 @@ def _apply_schedule(schedule, db):
     from app.models.product import Product
     from app.models.variant import ProductVariant
     from app.workers.sync_tasks import sync_price_update_only
+    from app.services.pricing_service import record_price_history
 
     variants = _get_target_variants(schedule, db)
     for variant in variants:
+        old_price = variant.price
         schedule.original_price = variant.price
         new_price = _calculate_schedule_price(variant.price, schedule)
-        if schedule.price_action == "compare_at":
-            variant.compare_at_price = variant.price
-            variant.price = new_price
-        else:
-            variant.compare_at_price = variant.price
-            variant.price = new_price
+        variant.compare_at_price = variant.price
+        variant.price = new_price
+        record_price_history(
+            db, schedule.product_id or variant.product_id, old_price, new_price,
+            source="scheduled", price_type="retail", variant_id=variant.id,
+        )
 
     schedule.status = "active"
     if schedule.product_id:
@@ -228,12 +247,18 @@ def _apply_schedule(schedule, db):
 
 def _revert_schedule(schedule, db):
     from app.workers.sync_tasks import sync_price_update_only
+    from app.services.pricing_service import record_price_history
 
     variants = _get_target_variants(schedule, db)
     for variant in variants:
         if schedule.original_price:
+            old_price = variant.price
             variant.price = schedule.original_price
             variant.compare_at_price = None
+            record_price_history(
+                db, schedule.product_id or variant.product_id, old_price, schedule.original_price,
+                source="scheduled_revert", price_type="retail", variant_id=variant.id,
+            )
 
     schedule.status = "completed"
     if schedule.product_id:
@@ -260,6 +285,9 @@ def _calculate_schedule_price(original: Decimal, schedule) -> Decimal:
         return original * (1 - val / 100)
     if schedule.price_action == "fixed_off":
         return max(original - val, Decimal("0"))
+    if schedule.price_action == "compare_at":
+        # Treat price_value as a percent discount; _apply_schedule sets compare_at = original
+        return original * (1 - val / 100)
     return original
 
 
@@ -285,10 +313,72 @@ def sync_use_supplier_prices(supplier_id: Optional[str] = None):
         db.close()
 
 
+def _try_shopify_json_price(source_url: str) -> Optional[Decimal]:
+    """Fast path: fetch price from Shopify's /products/{handle}.json endpoint (sync).
+    Works for any Shopify-hosted store URL. Returns None if not applicable or unavailable.
+    """
+    import re
+    import httpx
+    match = re.search(r"(https?://[^/]+/products/[^/?#]+)", source_url)
+    if not match:
+        return None
+    json_url = match.group(1).rstrip("/") + ".json"
+    try:
+        resp = httpx.get(
+            json_url,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; ProductBot/1.0)"},
+            timeout=10,
+            follow_redirects=True,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        variants = (data.get("product") or {}).get("variants") or []
+        if variants:
+            price_str = str(variants[0].get("price") or "")
+            if price_str:
+                return Decimal(price_str)
+    except Exception:
+        pass
+    return None
+
+
+async def _scrape_price_async(source_url: str, price_selector: str):
+    """Playwright fallback: scrape price from non-Shopify pages."""
+    from playwright.async_api import async_playwright
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page(user_agent="Mozilla/5.0 (compatible; ProductBot/1.0)")
+        try:
+            await page.goto(source_url, wait_until="load", timeout=30000)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=8000)
+            except Exception:
+                pass
+            try:
+                await page.wait_for_selector(price_selector, timeout=5000)
+            except Exception:
+                pass
+            try:
+                price_el = await page.query_selector(price_selector)
+                if price_el:
+                    raw = await price_el.get_attribute("content") or await price_el.inner_text()
+                    price_str = raw.replace("$", "").replace(",", "").strip()
+                    try:
+                        return Decimal(price_str.split()[0])
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        finally:
+            await browser.close()
+    return None
+
+
 @celery_app.task(name="app.workers.pricing_tasks.sync_single_supplier_price", bind=True, max_retries=2)
 def sync_single_supplier_price(self, product_id: str):
     """Scrape the product's source URL for its current price and update base_price."""
-    from playwright.sync_api import sync_playwright
+    import asyncio
     from app.database import SessionLocal
     from app.models.product import Product
 
@@ -310,33 +400,30 @@ def sync_single_supplier_price(self, product_id: str):
             "[itemprop='price'], .product__price, .price, .product-price, [data-price]",
         )
 
-        new_price = None
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page(user_agent="Mozilla/5.0 (compatible; ProductBot/1.0)")
-            page.goto(product.source_url, wait_until="domcontentloaded", timeout=20000)
-            try:
-                page.wait_for_load_state("networkidle", timeout=5000)
-            except Exception:
-                pass
+        # Try Shopify JSON fast path first (sync, no event loop needed)
+        new_price = _try_shopify_json_price(product.source_url)
 
-            price_el = page.query_selector(price_selector)
-            if price_el:
-                raw = price_el.get_attribute("content") or price_el.inner_text()
-                price_str = raw.replace("$", "").replace(",", "").strip()
-                try:
-                    new_price = Decimal(price_str.split()[0])
-                except Exception:
-                    pass
-            browser.close()
+        # Fall back to Playwright only if the fast path didn't find a price
+        if new_price is None:
+            new_price = asyncio.run(_scrape_price_async(product.source_url, price_selector))
 
         if new_price is None:
             return {"updated": False, "reason": "price not found"}
 
-        changed = product.supplier_price != new_price
+        old_supplier_price = product.supplier_price
+        changed = old_supplier_price != new_price
         product.supplier_price = new_price
         product.supplier_price_at = datetime.utcnow()
         product.base_price = new_price  # use_supplier_price=True means base follows supplier
+
+        if changed:
+            from app.services.pricing_service import record_price_history
+            record_price_history(
+                db, product.id, old_supplier_price, new_price,
+                source="scrape", price_type="supplier",
+                supplier_id=product.supplier_id,
+            )
+
         db.commit()
         return {"updated": True, "changed": changed, "price": str(new_price)}
 

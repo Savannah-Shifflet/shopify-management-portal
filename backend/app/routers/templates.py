@@ -17,9 +17,11 @@ router = APIRouter(prefix="/api/v1/templates", tags=["templates"])
 # ── Schemas ────────────────────────────────────────────────────────────────────
 
 class SectionIn(BaseModel):
-    level: str   # "h2" | "h3"
-    title: str
+    tag: str = "h2"        # "h2" | "h3" | "p" | "ul" | "ol" | "table"
+    title: str             # heading text for h2/h3; descriptive label for content elements
     hint: Optional[str] = ""
+    required: bool = True  # True = always generate; False = only if product data is sufficient
+    indent: int = 0        # 0 = top-level, 1 = nested, 2 = deeply nested
 
 
 class TemplateCreate(BaseModel):
@@ -135,12 +137,29 @@ def ai_fill(
     ai_description = product.ai_description or ""
     ai_attributes = product.ai_attributes or {}
 
-    # Format template structure for the prompt
-    section_lines = "\n".join(
-        f"  <{s['level']}>{s['title']}</{s['level']}>"
-        + (f"  <!-- {s['hint']} -->" if s.get("hint") else "")
-        for s in sections
-    )
+    TAG_GUIDANCE = {
+        "h2":    "H2 heading (becomes a tab in the store)",
+        "h3":    "H3 heading (becomes a sub-section accordion)",
+        "p":     "prose paragraph(s) — use <p> tags",
+        "ul":    "unordered bullet list — use <ul><li>",
+        "ol":    "numbered list — use <ol><li>",
+        "table": "two-column specs table — use <table><thead><tbody><tr><th><td>",
+    }
+
+    # Build an indented outline for the prompt showing the nested structure
+    section_lines_parts = []
+    for s in sections:
+        tag = s.get("tag") or ("h3" if s.get("level") == "h3" else "h2")  # back-compat
+        indent = s.get("indent", 0)
+        required = s.get("required", True)
+        req_label = "REQUIRED" if required else "OPTIONAL"
+        guidance = TAG_GUIDANCE.get(tag, tag)
+        hint_part = f" — {s['hint']}" if s.get("hint") else ""
+        prefix = "  " * indent
+        section_lines_parts.append(
+            f"{prefix}[{req_label}] <{tag}> {s['title']} ({guidance}){hint_part}"
+        )
+    section_lines = "\n".join(section_lines_parts)
 
     # Format AI attributes as context
     attrs_text = ""
@@ -161,7 +180,7 @@ def ai_fill(
 Product: {product.title}
 {attrs_text}
 
-TEMPLATE STRUCTURE (preserve these exact headings and nesting):
+TEMPLATE STRUCTURE:
 {section_lines}
 
 EXISTING CONTENT TO REORGANIZE:
@@ -172,10 +191,16 @@ AI-GENERATED DESCRIPTION (additional context):
 
 RULES:
 - Use ONLY these HTML tags: h2, h3, p, ul, ol, li, strong, em, br, table, thead, tbody, tr, th, td
-- Keep the exact heading titles from the template
-- Distribute existing content into the most relevant sections
-- For sections with no matching existing content, write concise appropriate copy based on the product title and type
-- Section hints (in comments) guide what content belongs there — do not output the hints/comments
+- Each row in the outline maps to an HTML element of that exact tag type
+- For h2/h3 rows: emit the heading with the exact title shown — e.g. <h2>Features</h2>
+- For p rows: emit one or more <p> paragraphs with relevant prose
+- For ul rows: emit <ul><li>…</li></ul> with relevant bullet points
+- For ol rows: emit <ol><li>…</li></ol> with numbered steps or points
+- For table rows: emit a two-column <table> with spec name and value pairs
+- Indentation in the outline shows nesting — emit nested elements directly inside their parent heading's section (no extra wrapper div)
+- REQUIRED rows: always include, even if you must write reasonable copy from the product title and type alone
+- OPTIONAL rows: only include if the product data above contains sufficient concrete information; omit the element entirely if not
+- Do not output section hints or the [REQUIRED]/[OPTIONAL] labels
 - Output ONLY the HTML, no explanations, no markdown code fences"""
 
     client = ClaudeClient()

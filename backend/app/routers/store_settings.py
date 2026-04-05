@@ -24,8 +24,15 @@ class StoreSettingsUpdate(BaseModel):
     smtp_password: Optional[str] = None
     smtp_from_name: Optional[str] = None
     smtp_from_email: Optional[str] = None
+    imap_host: Optional[str] = None
+    imap_port: Optional[int] = None
+    imap_user: Optional[str] = None
+    imap_password: Optional[str] = None
+    imap_folder: Optional[str] = None
     map_hard_block: Optional[bool] = None
     low_stock_threshold: Optional[int] = None
+    default_markup_pct: Optional[float] = None
+    default_shipping_cost: Optional[float] = None
 
 
 def _get_or_create(user_id, db: Session) -> StoreSettings:
@@ -47,8 +54,14 @@ def get_settings(db: Session = Depends(get_db), current_user: User = Depends(get
         "smtp_host": s.smtp_host, "smtp_port": s.smtp_port,
         "smtp_user": s.smtp_user,
         "smtp_from_name": s.smtp_from_name, "smtp_from_email": s.smtp_from_email,
+        "imap_host": s.imap_host, "imap_port": s.imap_port,
+        "imap_user": s.imap_user, "imap_folder": s.imap_folder,
+        # Never return imap_password — frontend uses empty string to indicate "unchanged"
         "map_hard_block": s.map_hard_block, "low_stock_threshold": s.low_stock_threshold,
+        "default_markup_pct": float(s.default_markup_pct) if s.default_markup_pct is not None else None,
+        "default_shipping_cost": float(s.default_shipping_cost) if s.default_shipping_cost is not None else None,
         "smtp_configured": bool(s.smtp_host and s.smtp_from_email),
+        "imap_configured": bool(s.imap_host and s.imap_user),
     }
 
 

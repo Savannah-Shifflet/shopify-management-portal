@@ -21,6 +21,10 @@ class Settings(BaseSettings):
 
     shopify_webhook_secret: str = ""
 
+    # Public-facing URLs (used for OAuth redirect_uri construction and frontend redirects)
+    app_url: str = "http://localhost:8000"       # Backend URL reachable by Shopify
+    frontend_url: str = "http://localhost:3000"  # Frontend URL for post-OAuth redirect
+
     secret_key: str = "change-this-in-production"
     cors_origins: List[str] = ["http://localhost:3000"]
     environment: str = "development"

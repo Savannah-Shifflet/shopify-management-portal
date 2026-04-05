@@ -14,9 +14,9 @@ class Product(Base):
     supplier_id = Column(UUID(as_uuid=True), ForeignKey("suppliers.id"), nullable=True)
     shopify_product_id = Column(BigInteger, unique=True, nullable=True, index=True)
 
-    # Workflow status
+    # Shopify-aligned status (mirrors Shopify product status)
     status = Column(String(50), default="draft", index=True)
-    # draft | enriched | approved | synced | archived
+    # draft | active | archived
 
     # Main product fields (user-edited / accepted from AI)
     title = Column(String(500), nullable=False)
@@ -32,16 +32,18 @@ class Product(Base):
     source_url = Column(Text)
     source_type = Column(String(50))  # manual | csv | pdf | scrape | image
 
-    # AI enrichment fields (separate from main fields)
+    # AI enrichment fields (separate from main fields — never auto-applied without user acceptance)
+    ai_title = Column(String(500))
     ai_description = Column(Text)
     ai_tags = Column(ARRAY(String))
     ai_attributes = Column(JSONB, default=dict)
     seo_title = Column(String(255))
     seo_description = Column(String(500))
-    enrichment_status = Column(String(50), default="pending")
-    # pending | running | done | failed
+    enrichment_status = Column(String(50), default="not_started")
+    # not_started | pending | running | done | failed
     enrichment_model = Column(String(100))
     enrichment_at = Column(DateTime)
+    applied_template_id = Column(UUID(as_uuid=True), ForeignKey("description_templates.id", ondelete="SET NULL"), nullable=True)
 
     # Pricing
     cost_price = Column(Numeric(10, 2))
@@ -51,6 +53,7 @@ class Product(Base):
     supplier_price = Column(Numeric(10, 2))
     supplier_price_at = Column(DateTime)
     use_supplier_price = Column(Boolean, default=False, nullable=False)
+    shipping_cost = Column(Numeric(10, 2))  # per-product shipping to bake into retail price
 
     # Shopify sync tracking
     sync_status = Column(String(50), default="never_synced")

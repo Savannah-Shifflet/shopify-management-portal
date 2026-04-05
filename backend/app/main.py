@@ -12,6 +12,7 @@ from app.routers import products, suppliers, pricing, imports, enrichment, sync,
 from app.routers import settings as settings_router
 from app.routers import email_templates, reorders, audit, store_settings
 from app.routers import analytics, webhooks
+from app.routers import shopify_oauth
 
 
 def _seed_stub_user():
@@ -69,6 +70,7 @@ app.mount("/uploads", StaticFiles(directory=settings.storage_path), name="upload
 
 # Routers
 app.include_router(auth.router)
+app.include_router(shopify_oauth.router)
 app.include_router(settings_router.router)
 app.include_router(products.router)
 app.include_router(suppliers.router)

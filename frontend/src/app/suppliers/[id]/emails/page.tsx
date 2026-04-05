@@ -1,19 +1,20 @@
 "use client";
 
-import { useState } from "react";
-import { useParams } from "next/navigation";
+import { useState, useEffect } from "react";
+import { useParams, useSearchParams } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { suppliersApi, supplierSrmApi, emailTemplatesApi } from "@/lib/api";
+import { suppliersApi, supplierSrmApi, emailTemplatesApi, storeSettingsApi } from "@/lib/api";
 import { PageShell } from "@/components/layout/PageShell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
-import { Send, ArrowLeft, Loader2, Mail, Inbox, ChevronDown, ChevronUp } from "lucide-react";
+import { Send, ArrowLeft, Loader2, Mail, Inbox, ChevronDown, ChevronUp, RefreshCw } from "lucide-react";
 import Link from "next/link";
 import { cn } from "@/lib/utils";
 
 export default function SupplierEmailsPage() {
   const { id } = useParams<{ id: string }>();
+  const searchParams = useSearchParams();
   const qc = useQueryClient();
   const [showCompose, setShowCompose] = useState(false);
   const [showLogInbound, setShowLogInbound] = useState(false);
@@ -21,10 +22,22 @@ export default function SupplierEmailsPage() {
   const [compose, setCompose] = useState({ subject: "", body: "" });
   const [inbound, setInbound] = useState({ subject: "", body: "", sent_at: "" });
   const [selectedTemplate, setSelectedTemplate] = useState("");
+  const [syncResult, setSyncResult] = useState<string | null>(null);
 
   const { data: supplier } = useQuery({ queryKey: ["supplier", id], queryFn: () => suppliersApi.get(id).then((r) => r.data) });
   const { data: emails = [], isLoading } = useQuery({ queryKey: ["supplier-emails", id], queryFn: () => supplierSrmApi.listEmails(id).then((r) => r.data) });
   const { data: templates = [] } = useQuery({ queryKey: ["email-templates"], queryFn: () => emailTemplatesApi.list().then((r) => r.data) });
+  const { data: storeSettings } = useQuery({ queryKey: ["store-settings"], queryFn: () => storeSettingsApi.get().then((r) => r.data) });
+
+  // Pre-fill compose from query params (e.g. Generate Letter)
+  useEffect(() => {
+    const subject = searchParams.get("subject");
+    const body = searchParams.get("body");
+    if (subject || body) {
+      setCompose({ subject: subject || "", body: body || "" });
+      setShowCompose(true);
+    }
+  }, []);
 
   const sendMutation = useMutation({
     mutationFn: () => supplierSrmApi.sendEmail(id, { to_email: (supplier as any)?.company_email, ...compose }),
@@ -36,11 +49,24 @@ export default function SupplierEmailsPage() {
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["supplier-emails", id] }); setShowLogInbound(false); setInbound({ subject: "", body: "", sent_at: "" }); },
   });
 
+  const syncMutation = useMutation({
+    mutationFn: () => supplierSrmApi.syncInbox(),
+    onSuccess: (res) => {
+      const d = res.data;
+      setSyncResult(`Synced: ${d.new_emails} new email${d.new_emails !== 1 ? "s" : ""} found.`);
+      qc.invalidateQueries({ queryKey: ["supplier-emails", id] });
+      setTimeout(() => setSyncResult(null), 5000);
+    },
+    onError: (err: any) => setSyncResult(`Sync failed: ${err.response?.data?.detail || err.message}`),
+  });
+
   const applyTemplate = (templateId: string) => {
     const t = (templates as any[]).find((t: any) => t.id === templateId);
     if (!t) return;
     const supplierName = (supplier as any)?.name || "Supplier";
-    const fill = (s: string) => s?.replace(/\{\{supplier_name\}\}/g, supplierName).replace(/\{\{my_store_name\}\}/g, "My Store").replace(/\{\{my_name\}\}/g, "");
+    const storeName = (storeSettings as any)?.store_name || "My Store";
+    const myName = (storeSettings as any)?.owner_name || "";
+    const fill = (s: string) => s?.replace(/\{\{supplier_name\}\}/g, supplierName).replace(/\{\{my_store_name\}\}/g, storeName).replace(/\{\{my_name\}\}/g, myName);
     setCompose({ subject: fill(t.subject || ""), body: fill(t.body || "") });
     setSelectedTemplate(templateId);
   };
@@ -54,11 +80,30 @@ export default function SupplierEmailsPage() {
       actions={
         <div className="flex gap-2">
           <Link href={`/suppliers/${id}`}><Button variant="outline" size="sm"><ArrowLeft className="h-4 w-4 mr-1" />Back</Button></Link>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => { setSyncResult(null); syncMutation.mutate(); }}
+            disabled={syncMutation.isPending}
+          >
+            {syncMutation.isPending
+              ? <><Loader2 className="h-4 w-4 mr-1 animate-spin" />Syncing...</>
+              : <><RefreshCw className="h-4 w-4 mr-1" />Sync Inbox</>}
+          </Button>
           <Button size="sm" variant="outline" onClick={() => setShowLogInbound(true)}><Inbox className="h-4 w-4 mr-1" />Log Response</Button>
           <Button size="sm" onClick={() => setShowCompose(true)}><Send className="h-4 w-4 mr-1" />Compose</Button>
         </div>
       }
     >
+      {/* Sync result banner */}
+      {syncResult && (
+        <div className={cn("mb-4 p-3 rounded-lg text-sm border",
+          syncResult.startsWith("Sync failed") ? "bg-red-50 border-red-200 text-red-700" : "bg-green-50 border-green-200 text-green-700"
+        )}>
+          {syncResult}
+        </div>
+      )}
+
       {/* Compose panel */}
       {showCompose && (
         <Card className="mb-5 border-blue-200">
